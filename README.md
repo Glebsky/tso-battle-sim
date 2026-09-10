@@ -1,93 +1,96 @@
 # TSO Adventure Tactical Planner
 
-> **Сквозной оптимизатор кампаний и тактический планировщик атак для игры *The Settlers Online (TSO)***
+[English](README.md) | [Русский](README.ru.md)
+
+> **End-to-end campaign optimizer and tactical attack planner for *The Settlers Online (TSO)***
 
 ---
 
-## О проекте: в чём главная концепция?
+## About the Project: Core Concept
 
-В большинстве существующих калькуляторов боёв TSO игроку приходится вручную перебирать генералов и армию под каждый отдельный вражеский лагерь.
+In most existing TSO battle calculators, players must manually experiment and find setups for every single enemy camp individually.
 
-**TSO Adventure Tactical Planner решает задачу на уровне всей кампании целиком:**
-1. Вы загружаете **полный пул своих генералов** (со всеми их талантами, навыками и вместимостью).
-2. Выбираете приключение и отмечаете **все нужные лагеря** (сектор или всю карту сразу).
-3. Нажимаете **«Рассчитать план волн»**.
+**TSO Adventure Tactical Planner solves the problem for the entire campaign at once:**
+1. You load the **full pool of your generals** (complete with all their talents, skills, and troop capacities).
+2. You pick an adventure and select **all desired camps** (a single sector or the whole map at once).
+3. You click **«Calculate wave plan»**.
 
-Система автоматически распределяет генералов по лагерям, выстраивает атаки в **параллельные волны**, учитывает 2-часовые откаты при поражениях, эффективно расходует бесплатные воскрешения (**1-UP**) и гарантирует сохранность дорогих элитных войск (**«Без потерь»**).
-
----
-
-## Ключевые возможности
-
-- ⚡ **Параллельные волны атак**: уничтожение максимального числа лагерей за один заход с минимальным общим временем прохождения приключения.
-- 🔍 **Поиск приключений в реальном времени**: удобный фильтр по 105+ картам приключений с мгновенным отбором по имени или ключевым словам.
-- 🛡️ **Защита войск «Без потерь» (`noLoss`)**: ценные юниты (например, *Конные стрелки*, *Осадные войска*) гарантированно не попадут в жертвенные вскрывающие волны и пойдут только на 100% безопасное добивание без риска гибели.
-- ✨ **Учёт жизней генералов и механики 1-UP**:
-  - Поддержка врождённых воскрешений (Призрачные генералы, Нарцисс, Младшие) и таланта *«Мгновенное восстановление»* (`Skill_InstantRecovery`).
-  - Строгое соблюдение капа TSO: максимум 1 бесплатный слив за приключение (`Math.min(1, base + skill)`).
-  - Учёт 2-часового отката при гибели и автоматическое исключение выбывших генералов из последующих волн.
-- 🎯 **Два фундаментальных режима оптимизации**:
-  - **«Максимум» (`max`)**: пройти приключение за минимальное количество волн, беря максимум лагерей одновременно.
-  - **«Беречь» (`min`)**: минимизировать потери генералов и совокупную стоимость потерь войск.
-- 🗡️ **Умная работа с боссами**: автоматический подбор войск с фланкированием (*Бронированные стрелки*, *Кавалерия*) для нейтрализации боссов с большим запасом здоровья в окружении свиты.
-- 🌐 **Современный веб-интерфейс**:
-  - Разделение настроек по вкладкам (*Лагеря*, *Генералы*, *Войска*, *Точность*).
-  - Интерактивная схема лагерей с цветовой маркировкой (малый, средний, большой, босс).
-  - Мультиязычность: **Русский**, **Українська**, **English**.
-  - Копирование готового тактического плана в буфер обмена в один клик.
-- 💻 **CLI-режим**: возможность запуска расчёта из терминала для пакетной обработки или отладки.
+The system automatically assigns generals across camps, arranges attacks into **concurrent waves**, accounts for 2-hour defeat recovery cooldowns, efficiently spends free revivals (**1-UP**), and strictly guarantees the survival of expensive elite units (**«No Loss»**).
 
 ---
 
-## Системные требования
+## Key Features
 
-- **Node.js**: версия `16.x`, `18.x` или выше (протестировано на Node.js v18/v20/v22).
-- Любая современная операционная система: **Windows**, **Linux**, **macOS**.
-- Внешние библиотеки не требуются — проект работает на встроенных средствах Node.js.
+- ⚡ **Concurrent Attack Waves**: Destroy the maximum number of camps in a single round, minimizing overall adventure completion time.
+- 🗺️ **Interactive Adventure Map**: Visual camp selection directly on high-resolution map overlays with camp unit tooltips, touch pan & pinch zoom, and attack order sequencing.
+- 🔍 **Real-Time Adventure Search**: Instant filtering across 105+ adventure maps by name or keywords in English, Ukrainian, and Russian.
+- 🛡️ **Troop Protection («No Loss» / `noLoss`)**: High-value units (e.g., *Mounted Marksman*, *Besieger*) are strictly excluded from sacrificial opener waves and deployed only for guaranteed 100% victories with 0 losses.
+- ✨ **General Life Tracking & 1-UP Mechanics**:
+  - Inherent revivals (Ghost General, Narcissistic General, Younger Gemini) and the *«Instant Recovery»* talent (`Skill_InstantRecovery`).
+  - Strict compliance with TSO rules: at most 1 free death per adventure (`Math.min(1, base + skill)`).
+  - Accurate 2-hour defeat cooldown tracking with automatic exclusion of fallen generals from subsequent waves.
+- 🎯 **Two Optimization Modes**:
+  - **«Maximum» (`max`)**: Clear the adventure in the fewest waves possible by conquering the maximum number of camps concurrently.
+  - **«Conserve» (`min`)**: Minimize general casualties and aggregate troop loss value.
+- 🗡️ **Intelligent Boss Handling**: Automatic deployment of flanking units (*Armored Marksman*, *Cavalry*) to neutralize high-HP bosses guarded by heavy-armor retainers.
+- 🌐 **Modern Web Interface**:
+  - Zero-scroll tactical layout organized into dedicated tabs (*Camps*, *Generals*, *Troops*, *Accuracy*).
+  - Interactive camp grid with color-coded camp difficulty markers (small, medium, large, boss).
+  - Trilingual localization: **English**, **Українська**, **Русский**.
+  - One-click export of tactical battle plans to clipboard.
+- 💻 **CLI Mode**: Run headless calculations directly from your terminal for scripting, benchmarking, or automated runs.
 
 ---
 
-## Установка
+## System Requirements
 
-1. Склонируйте репозиторий или скачайте архив с проектом:
+- **Node.js**: Version `16.x`, `18.x`, or higher (tested on Node.js v18/v20/v22/v24).
+- Any modern operating system: **Windows**, **Linux**, **macOS**.
+- Zero external runtime npm dependencies — runs entirely using standard Node.js libraries (`http`, `https`, `fs`, `path`, `vm`, `url`).
+
+---
+
+## Installation
+
+1. Clone the repository or download the project archive:
    ```bash
-   git clone <URL_РЕПОЗИТОРИЯ>
+   git clone <REPOSITORY_URL>
    cd battle-sim
    ```
 
-2. Проект не требует сторонних зависимостей `node_modules` для сервера и планировщика. Достаточно убедиться, что установлен Node.js:
+2. The project requires no third-party `node_modules` packages for the server or planner. Simply verify that Node.js is installed:
    ```bash
    node -v
    ```
 
 ---
 
-## Запуск проекта
+## Getting Started
 
-### 1. Веб-интерфейс (рекомендуется)
+### 1. Web Interface (Recommended)
 
-Запустите локальный сервер командой:
+Start the local server using npm:
 ```bash
 npm start
 ```
-или напрямую через Node.js:
+or directly via Node.js:
 ```bash
 node planner/server.js
 ```
 
-После запуска откройте в браузере адрес:
+Once started, open your browser and navigate to:  
 👉 **[http://localhost:8787](http://localhost:8787)**
 
 > [!TIP]
-> По умолчанию сервер запускается на порту `8787`. При необходимости порт можно изменить через переменную окружения:
+> By default, the server listens on port `8787`. You can customize the port via an environment variable:
 > ```bash
 > PORT=9000 npm start
 > ```
-> Сервер поддерживает **Hot Reload** алгоритмов планировщика — при изменении файлов `planner.js`, `multi.js` перезапускать сервер не требуется.
+> The server features **Hot Reload** for planner algorithms — modifications to `planner.js` or `multi.js` take effect immediately on the next calculation without restarting the server.
 
-### 2. Запуск через командную строку (CLI)
+### 2. Command Line Interface (CLI)
 
-Для консольного расчёта используйте скрипт `planner/plan.js`:
+For headless command-line calculations, use `planner/plan.js`:
 ```bash
 node planner/plan.js "BonabertiBusiness: 1, 2, 3, 4, 5, 6" \
   --generals planner/generals.sample.json \
@@ -99,86 +102,89 @@ node planner/plan.js "BonabertiBusiness: 1, 2, 3, 4, 5, 6" \
 
 ---
 
-## Пошаговое руководство пользователя
+## Step-by-Step User Guide
 
-### Шаг 1. Загрузка ваших генералов
-1. Откройте популярный симулятор **[tsowiki.eu/simulator](https://tsowiki.eu/simulator/)**.
-2. Перейдите во вкладку **«Генералы»**, где настроены ваши генералы и их таланты.
-3. Нажмите кнопку **«Экспорт»** и сохраните файл `.json` (например, `tsowiki-generals.json`).
-4. В веб-интерфейсе планировщика перейдите на вкладку **«Генералы»** и перетащите файл в область загрузки (файл сохранится в `localStorage` вашего браузера).
-5. При необходимости снимите галочки с генералов, которых вы не хотите отправлять в данное приключение.
+### Step 1. Load Your Generals
+1. Open the simulator at **[tsowiki.eu/simulator](https://tsowiki.eu/simulator/)**.
+2. Go to the **«Generals»** tab where your generals and their skill trees are configured.
+3. Click the **«Export»** button and save the `.json` file (e.g. `tsowiki-generals.json`).
+4. In the TSO Planner web interface, navigate to the **«Generals»** tab and drag-and-drop the file into the upload zone (the data is saved locally in your browser's `localStorage`).
+5. Optionally uncheck any generals you do not want to deploy in the adventure.
 
-### Шаг 2. Выбор приключения и лагерей
-1. На вкладке **«Лагеря»** введите название приключения в строку поиска (например, `tailor`, `nord`, `1001` или `bonaberti`).
-2. В выпадающем списке выберите приключение.
-3. Кликните по нужным лагерям на интерактивной сетке карты, либо используйте кнопки:
-   - **«Все по порядку»** — добавить все лагеря приключения в очередь атаки;
-   - Ручной ввод номеров лагерей через запятую.
+### Step 2. Select Adventure & Target Camps
+1. On the **«Camps»** tab, search for your adventure in the filter input (e.g. `tailor`, `nord`, `1001`, or `bonaberti`).
+2. Select the adventure from the dropdown list.
+3. Click on the camps you want to clear in the camp grid, or click **«Map»** to pick camps directly on the visual map, or use the quick buttons:
+   - **«All in order»** — adds all adventure camps to the attack queue in sequence;
+   - Manual camp entry (enter camp numbers separated by commas).
 
-### Шаг 3. Настройка войск и защита от потерь
-1. Перейдите на вкладку **«Войска»**.
-2. Выберите доступные пресеты войск (**Элита** или **Все**).
-3. В колонке **«Без потерь»** отметьте ценных юнитов (*Конные стрелки*, *Осадные войска* и т.д.). Планировщик гарантирует, что они не погибнут.
+### Step 3. Configure Troops & Protection
+1. Switch to the **«Troops»** tab.
+2. Select an army preset (**Elite** or **All**).
+3. In the **«No Loss»** column, check the units you wish to protect (*Mounted Marksman*, *Besieger*, etc.). The planner strictly guarantees zero casualties for these units.
 
-### Шаг 4. Настройки расчёта и запуск
-1. На вкладке **«Точность»** или в доке выберите режим:
-   - **Максимум**: пройти за минимум волн;
-   - **Беречь**: сохранить войска и генералов.
-2. Нажмите кнопку **«Рассчитать план волн»**.
+### Step 4. Calculation Settings & Execution
+1. On the **«Accuracy»** tab or in the bottom bar, choose your optimization strategy:
+   - **Maximum**: prioritize clearing camps in the fewest waves possible;
+   - **Conserve**: prioritize saving troops and generals.
+2. Click **«Calculate wave plan»**.
 
-### Шаг 5. Получение и экспорт результата
-1. В окне результатов отобразится готовый тактический график по волнам:
-   - **Волна 1, 2, ...**: какие лагеря атакуются параллельно;
-   - Какой генерал назначен на каждый лагерь и его точный состав армии;
-   - Шаги боя (вскрытие лагеря первым генералом, добивание вторым);
-   - Статусы генералов: выжил, использовал бесплатный слив (`✨ Бесплатный слив 1-UP`) или ушёл на 2-часовой откат (`⏳ Откат 2 часа`).
-2. Нажмите кнопку **«Скопировать план»** для удобной отправки в чат игры или блокнот.
+### Step 5. Review & Export Tactical Plan
+1. The results panel will render a complete wave schedule:
+   - **Wave 1, 2, ...**: which camps are tackled concurrently;
+   - The general assigned to each camp along with their exact army composition;
+   - Battle steps (e.g. opener general sacrificing or softening up the camp, followed by a finishing closer general);
+   - General status tracking: survived, used free 1-UP revival (`✨ Free 1-UP revival`), or sent on 2-hour recovery cooldown (`⏳ 2h Cooldown`).
+2. Click **«Copy plan»** to copy the formatted text for in-game chat or notes.
 
 ---
 
-## Структура проекта
+## Project Structure
 
 ```
 battle-sim/
-├── README.md               # Документация проекта для пользователей и разработчиков
-├── AGENTS.md               # Инструкции и архитектурное описание для AI-агентов
-├── GUIDE.md                # Памятка по тактической оптимизации
-├── package.json            # Манифест проекта
-├── wasm.js                 # JS-интерфейс движка симуляции боёв
-├── wasm_bg.wasm            # Бинарный модуль симуляции боёв TSO (tsowiki)
-├── adventures/             # База данных приключений (105+ JSON-файлов)
+├── README.md               # Project documentation (English)
+├── README.ru.md            # Project documentation (Russian)
+├── AGENTS.md               # Architectural reference & guidelines for AI agents
+├── GUIDE.md                # Tactical concept overview
+├── package.json            # Project manifest ("type": "commonjs")
+├── wasm.js                 # JS glue code for WebAssembly combat engine
+├── wasm_bg.wasm            # Compiled WebAssembly binary for TSO battle simulation (tsowiki)
+├── adventures/             # Adventure map definitions (105+ JSON files)
 │   ├── BonabertiBusiness.json
 │   ├── TheBlackKnights.json
 │   └── ...
-└── planner/                # Модули планировщика и веб-сервера
-    ├── server.js           # HTTP API сервер и раздача статики
-    ├── engine.js           # Взаимодействие с симулятором боёв, чтение приключений
-    ├── planner.js          # Ядро оптимизации волн, подбор армий, учёт жизней и откатов
-    ├── multi.js            # Симуляция связок генералов (squads) и цепочек боёв
-    ├── matching.js         # Распределение генералов по лагерям
-    ├── plan.js             # Консольный интерфейс (CLI)
-    └── ui/                 # Веб-интерфейс
-        ├── index.html      # Главная страница (zero-scroll UI, стили, разметка)
-        ├── app.js          # Клиентская логика, поиск приключений, рендер дашборда
-        ├── i18n.js         # Мультиязычная локализация (EN, UK, RU)
-        └── unit-icons.js   # Иконки и справочники войск TSO
+├── maps/                   # Downloaded WebP map overlays
+└── planner/                # Planner core and server
+    ├── server.js           # Lightweight HTTP API server & static file router
+    ├── engine.js           # WASM bridge, adventure loader, battle simulator
+    ├── planner.js          # Core optimizer: army candidates, wave allocation, life tracker
+    ├── multi.js            # Squad (multi-general) and chain battle simulation
+    ├── matching.js         # Bipartite matching for general-to-camp assignment
+    ├── plan.js             # CLI entrypoint for headless calculation
+    └── ui/                 # Web interface assets (zero-scroll SPA)
+        ├── index.html      # Responsive HTML5 & CSS3 layout
+        ├── app.js          # Client-side logic, interactive map, state management
+        ├── i18n.js         # Trilingual localization engine (EN, UK, RU)
+        └── unit-icons.js   # Unit metadata & SVG icon definitions
 ```
 
 ---
 
-## API сервера
+## Server API
 
-Сервер предоставляет следующие HTTP JSON эндпоинты:
+The built-in HTTP server exposes the following JSON endpoints:
 
-| Метод | Путь | Описание |
+| Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/meta` | Список всех приключений, справочник юнитов и дефолтные пресеты |
-| `GET` | `/api/adventure?id=<NAME>` | Список лагерей выбранного приключения с составами вражеских войск |
-| `POST` | `/api/generals` | Парсинг и валидация экспортного файла генералов |
-| `POST` | `/api/plan` | Запуск полного цикла планирования волн по переданным параметрам |
+| `GET` | `/api/meta` | Adventure list, unit definitions, and default presets |
+| `GET` | `/api/adventure?id=<NAME>` | Camp details and enemy compositions for the specified adventure |
+| `POST` | `/api/generals` | Parses and validates tsowiki generals export JSON |
+| `POST` | `/api/plan` | Executes wave optimization based on supplied parameters |
+| `GET` | `/api/map-image?key=<NAME>` | Serves cached WebP map image or fetches it on-demand from tsowiki |
 
 ---
 
-## Лицензия
+## License
 
-Проект предназначен для игроков и сообщества **The Settlers Online**. Модели боёв и симуляция основаны на открытых данных сообщества (tsowiki.eu).
+This project is created for the players and community of **The Settlers Online**. Combat models and simulation are based on open community data (tsowiki.eu).

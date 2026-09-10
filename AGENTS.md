@@ -21,7 +21,8 @@
 
 ```
 battle-sim/
-├── README.md               # User documentation (RU)
+├── README.md               # User documentation (EN)
+├── README.ru.md            # User documentation (RU)
 ├── AGENTS.md               # This document: AI agent & developer guidelines
 ├── GUIDE.md                # Tactical concept overview
 ├── package.json            # CommonJS package manifest ("scripts": { "start": "node planner/server.js" })
