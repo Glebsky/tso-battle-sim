@@ -89,6 +89,7 @@ const server = http.createServer(async (req, res) => {
         map: data.map || null,
         camps: camps.map((c) => ({
           number: c.number, key: c.key, type: c.type, sector: c.sector,
+          building: c.building, coordinates: c.coordinates,
           position: data.camps[c.key]?.position || null,
           units: c.units.map((u) => ({ id: u.id, amount: u.amount })),
         })),
@@ -127,6 +128,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const generals = buildGenerals(body.generalsExport).map((g) => ({
         uid: g.uid, name: g.name, base: g.base, capacity: g.capacity, skills: g.skillList,
+        type: g.type, grid: g.grid, rawName: g.rawName,
       }));
       return send(res, 200, { generals, unitValues: body.generalsExport.unitValues || {} });
     }

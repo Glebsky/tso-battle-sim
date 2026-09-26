@@ -147,6 +147,8 @@ const I18N = {
     'result.title': 'Tactical Battle Plan',
     'result.subtitle': '{adv} · {camps} camps',
     'result.btnCopy': 'Copy plan',
+    'result.btnCopyClient': 'Copy client script',
+    'result.btnCopyWaveClient': 'Copy wave {num} for client',
     'result.bento.waves': 'Waves',
     'result.bento.lostValue': 'Lost value',
     'result.bento.lostUnits': 'Troop losses',
@@ -206,6 +208,8 @@ const I18N = {
     'toast.needCamps': 'Please select at least one camp to attack in the «Camps» tab',
     'toast.copied': 'Plan copied to clipboard!',
     'toast.copyFailed': 'Failed to copy plan to clipboard',
+    'toast.clientCopied': 'Client attack script copied to clipboard!',
+    'toast.clientWaveCopied': 'Wave {num} script copied for client!',
     'toast.jsonError': 'Error parsing generals JSON: {err}',
 
     // Roles
@@ -377,6 +381,8 @@ const I18N = {
     'result.title': 'Тактичний план бою',
     'result.subtitle': '{adv} · {camps} таборів',
     'result.btnCopy': 'Скопіювати план',
+    'result.btnCopyClient': 'Копіювати для клієнта',
+    'result.btnCopyWaveClient': 'Копіювати хвилю {num} для клієнта',
     'result.bento.waves': 'Хвиль',
     'result.bento.lostValue': 'Вартість втрат',
     'result.bento.lostUnits': 'Втрати військ',
@@ -436,6 +442,8 @@ const I18N = {
     'toast.needCamps': 'Оберіть хоча б один табір для атаки у вкладці «Табори»',
     'toast.copied': 'План скопійовано в буфер обміну!',
     'toast.copyFailed': 'Не вдалося скопіювати план',
+    'toast.clientCopied': 'Скрипт атак для клієнта скопійовано!',
+    'toast.clientWaveCopied': 'Скрипт хвилі {num} для клієнта скопійовано!',
     'toast.jsonError': 'Помилка читання JSON генералів: {err}',
 
     // Roles
@@ -607,6 +615,8 @@ const I18N = {
     'result.title': 'Тактический план боя',
     'result.subtitle': '{adv} · {camps} лагерей',
     'result.btnCopy': 'Скопировать план',
+    'result.btnCopyClient': 'Копировать для клиента',
+    'result.btnCopyWaveClient': 'Копировать волну {num} для клиента',
     'result.bento.waves': 'Волн',
     'result.bento.lostValue': 'Стоимость потерь',
     'result.bento.lostUnits': 'Потери войск',
@@ -666,6 +676,8 @@ const I18N = {
     'toast.needCamps': 'Выберите хотя бы один лагерь для атаки во вкладке «Лагеря»',
     'toast.copied': 'План скопирован в буфер обмена!',
     'toast.copyFailed': 'Не удалось скопировать план',
+    'toast.clientCopied': 'Скрипт атак для клиента скопирован в буфер обмена!',
+    'toast.clientWaveCopied': 'Скрипт волны {num} для клиента скопирован в буфер обмена!',
     'toast.jsonError': 'Ошибка чтения JSON генералов: {err}',
 
     // Roles

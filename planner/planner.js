@@ -147,8 +147,18 @@ const GAME_TYPE_BASES = {
   7: 'HalloweenGeneral', 9: 'EasterGeneral', 13: 'MajorGeneral',
   15: 'StarGeneral2', 16: 'StarGeneral3', 33: 'Xmas2019General',
   36: 'MedicGeneral', 37: 'MadScientistGeneral', 50: 'Halloween2019General',
-  57: 'SylvanaGeneral', 63: 'GhostGeneral', 75: 'NutcrackerGeneral',
-  79: 'ResoluteGeneral', 85: 'GeneralJuan',
+  56: 'AssassinGeneral', 57: 'SylvanaGeneral', 63: 'GhostGeneral',
+  75: 'NutcrackerGeneral', 79: 'ResoluteGeneral', 85: 'GeneralJuan',
+  96: 'NarcissisticGeneral',
+};
+
+const BASE_TO_GAME_TYPE = {
+  HalloweenGeneral: 7, EasterGeneral: 9, MajorGeneral: 13,
+  StarGeneral2: 15, StarGeneral3: 16, Xmas2019General: 33,
+  MedicGeneral: 36, MadScientistGeneral: 37, Halloween2019General: 50,
+  AssassinGeneral: 56, SylvanaGeneral: 57, GhostGeneral: 63,
+  NutcrackerGeneral: 75, ResoluteGeneral: 79, GeneralJuan: 85,
+  NarcissisticGeneral: 96, GeneralMary: 33, General: 1,
 };
 
 const GAME_NAME_BASES = [
@@ -226,12 +236,17 @@ function normalizeExport(raw, warnings) {
         byUid.set(uid, {
           uid,
           name: stripHtml(atk.name) || uid,
-          type: atk.type,
+          rawName: atk.name || null,
+          grid: atk.grid != null ? atk.grid : null,
+          type: atk.type || null,
           skills: Object.assign({}, atk.skills || {}),
           capacity: total,
         });
         continue;
       }
+      if (cur.grid == null && atk.grid != null) cur.grid = atk.grid;
+      if (!cur.rawName && atk.name) cur.rawName = atk.name;
+      if (!cur.type && atk.type) cur.type = atk.type;
       cur.capacity = Math.max(cur.capacity, total);
       for (const key of Object.keys(atk.skills || {})) {
         cur.skills[key] = Math.max(Number(cur.skills[key]) || 0, Number(atk.skills[key]) || 0);
@@ -246,10 +261,12 @@ function normalizeExport(raw, warnings) {
     specialists.push({
       id: g.uid,
       name: g.name,
+      rawName: g.rawName || (g.name ? `<b>${g.name}</b>` : null),
+      grid: g.grid != null ? g.grid : 0,
       base: base || 'General',
       capacity: g.capacity,
       skills: g.skills,
-      type: g.type,
+      type: g.type || (base ? BASE_TO_GAME_TYPE[base] : 1),
     });
   }
   if (warnings) {
@@ -275,9 +292,13 @@ function buildGenerals(rawExport, warnings) {
   const generals = (exportData.specialists || []).map((s) => {
     const skills = normalizeSkills(s.skills, skillMap, s.type, unmapped);
     const given = Number(s.capacity);
+    const resolvedType = s.type || BASE_TO_GAME_TYPE[s.base] || 1;
     return {
       uid: s.id,
       name: s.name || s.base,
+      rawName: s.rawName || (s.name ? `<b>${s.name}</b>` : `<b>${s.base}</b>`),
+      grid: s.grid != null ? s.grid : 0,
+      type: resolvedType,
       base: s.base,
       skills,
       capacity: given > 0 ? given : generalCapacity(s.base, skills),
@@ -1300,11 +1321,29 @@ function plan(input) {
 
       if (option.kind === 'chain') {
         const g = freeByClass.get(option.classId).shift();
-        const general = { uid: g.uid, name: g.name, base: g.base, capacity: g.capacity };
+        const general = {
+          uid: g.uid,
+          name: g.name,
+          base: g.base,
+          capacity: g.capacity,
+          type: g.type,
+          grid: g.grid,
+          rawName: g.rawName,
+          skills: g.skillList,
+        };
         option.perCamp.forEach((pc, t) => {
           const camp = window[index + t];
           attacks.push({
-            camp: { number: camp.number, key: camp.key, type: camp.type, sector: camp.sector, units: camp.units },
+            camp: {
+              number: camp.number,
+              key: camp.key,
+              type: camp.type,
+              sector: camp.sector,
+              building: camp.building || null,
+              coordinates: camp.coordinates || null,
+              position: camp.position || null,
+              units: camp.units,
+            },
             generalsUsed: t === 0 ? 1 : 0,
             chained: true,
             chainIndex: t + 1,
@@ -1337,10 +1376,31 @@ function plan(input) {
       const camp = window[index];
       const squad = option.squad.map((s) => {
         const g = freeByClass.get(s.classId).shift();
-        return { ...s, general: { uid: g.uid, name: g.name, base: g.base, capacity: g.capacity } };
+        return {
+          ...s,
+          general: {
+            uid: g.uid,
+            name: g.name,
+            base: g.base,
+            capacity: g.capacity,
+            type: g.type,
+            grid: g.grid,
+            rawName: g.rawName,
+            skills: g.skillList,
+          },
+        };
       });
       attacks.push({
-        camp: { number: camp.number, key: camp.key, type: camp.type, sector: camp.sector, units: camp.units },
+        camp: {
+          number: camp.number,
+          key: camp.key,
+          type: camp.type,
+          sector: camp.sector,
+          building: camp.building || null,
+          coordinates: camp.coordinates || null,
+          position: camp.position || null,
+          units: camp.units,
+        },
         generalsUsed: option.generals,
         chained: false,
         squad,

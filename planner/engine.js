@@ -76,6 +76,9 @@ function loadAdventure(id) {
     number: c.number,
     type: c.type,
     sector: c.sector,
+    building: c.building || null,
+    coordinates: c.coordinates || null,
+    position: c.position || null,
     hitpoints: c.hitpoints ?? 250,
     units: c.units.map((u) => ({ id: u.id, value: 0, amount: u.amount })),
   }));
