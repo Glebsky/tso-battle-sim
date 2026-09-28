@@ -89,11 +89,15 @@ function loadAdventure(id) {
 function campGarrison(camp) {
   return {
     kind: 'Default',
-    hitpoints: camp.hitpoints,
+    hitpoints: camp.hitpoints ?? 250,
     camp_id: camp.key,
-    camp_type: camp.type,
+    camp_type: camp.type || 'Small',
     general: null,
-    units: camp.units,
+    units: (camp.units || []).map((u) => ({
+      id: u.id,
+      value: u.value != null ? Number(u.value) : 0,
+      amount: Number(u.amount) || 0,
+    })),
   };
 }
 

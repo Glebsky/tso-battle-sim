@@ -92,7 +92,7 @@ const server = http.createServer(async (req, res) => {
           number: c.number, key: c.key, type: c.type, sector: c.sector,
           building: c.building, coordinates: c.coordinates,
           position: data.camps[c.key]?.position || null,
-          units: c.units.map((u) => ({ id: u.id, amount: u.amount })),
+          units: c.units.map((u) => ({ id: u.id, value: 0, amount: u.amount })),
         })),
       });
     }

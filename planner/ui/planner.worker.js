@@ -52,9 +52,13 @@ function campGarrison(camp) {
     kind: 'Default',
     hitpoints: camp.hitpoints ?? 250,
     camp_id: camp.key,
-    camp_type: camp.type,
+    camp_type: camp.type || 'Small',
     general: null,
-    units: camp.units,
+    units: (camp.units || []).map((u) => ({
+      id: u.id,
+      value: u.value != null ? Number(u.value) : 0,
+      amount: Number(u.amount) || 0,
+    })),
   };
 }
 
@@ -652,14 +656,20 @@ function searchCampOptions(camp, classes, availByClass, pool, opts) {
   const { units, stepPct, reps, verify, unitValues, noLoss, maxGeneralsPerCamp, beam, maxOptions } = opts;
   const squadLimit = opts.generalUsage === 'max' ? 48 : maxOptions;
   const soloLimit = opts.generalUsage === 'max' ? 24 : maxOptions;
-  const sim = (chain, repetitions) => simulateSquad({
-    camp,
-    squad: chain.map((s) => ({ general: s.cls.sample, army: s.army })),
-    repetitions,
-    unitValues,
-  });
+  const sim = (chain, repetitions) => {
+    try {
+      return simulateSquad({
+        camp,
+        squad: chain.map((s) => ({ general: s.cls.sample, army: s.army })),
+        repetitions,
+        unitValues,
+      });
+    } catch (e) {
+      return null;
+    }
+  };
   const isOpenerSafe = (army) => army.every((u) => !(noLoss || []).includes(u.id));
-  const accept = (chain, r) => r.victoryChance === 1 &&
+  const accept = (chain, r) => r && r.victoryChance === 1 &&
     !violatesNoLoss(r.perUnit, noLoss) &&
     !violatesSacrifice(chain, r.waves, opts) &&
     chain.slice(0, -1).every((s) => isOpenerSafe(s.army));
@@ -673,6 +683,7 @@ function searchCampOptions(camp, classes, availByClass, pool, opts) {
       if (opts.timeBudgetMs > 0 && (Date.now() - opts.t0) >= opts.timeBudgetMs) break;
       const chain = [{ cls, army }];
       const r = sim(chain, reps);
+      if (!r) continue;
       probes.push({
         cls, army,
         defKills: r.waves[0] ? r.waves[0].defKills : 0,
