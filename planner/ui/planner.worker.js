@@ -1,28 +1,183 @@
-// Wave planner on top of the real WASM combat engine — v5.
-//
-// Rules implemented:
-//  * camps are always processed in the exact order the user typed them;
-//  * each wave takes the longest possible contiguous prefix of the remaining
-//    camps (main goal: crack as many camps as possible per wave);
-//  * a camp may be attacked by SEVERAL generals in sequence (a "squad").
-//    The engine natively chains attacker waves against one camp and carries
-//    defender casualties over, so squads are simulated exactly, not guessed.
-//    This is what makes boss camps (e.g. BanditBoss5, 60000 HP) solvable at
-//    all: no single general can ever out-damage them.
-//    By default the squad size is limited only by how many generals you have.
-//  * optionally (chainCamps) ONE general may take SEVERAL consecutive camps
-//    with the army it has left — the cheapest way to save generals;
-//  * sacrificial waves (an army that dies almost completely to open a camp)
-//    are allowed only with cheap units by default (sacrificePolicy);
-//  * the army stock is shared: every general of one wave draws from the same
-//    pool, and after the wave the pool loses only the casualties;
-//  * among plans with the same number of camps, generalUsage decides:
-//      'min' — fewest generals wins (save generals for other tasks),
-//      'max' — put as many generals to work as possible (push further).
-//    Loss value is the final tie-break in both cases.
-const { loadAdventure, generalCapacity } = require('./engine');
-const { simulateSquad, simulateChainCamps, unitStats } = require('./multi');
+// TSO Adventure Tactical Planner — In-Browser WebAssembly Web Worker
+// Runs multi-wave combat simulations and tactical campaign planning directly
+// in a background browser thread, eliminating server timeouts and serverless limits.
 
+/* global wasm_bindgen, importScripts */
+
+const baseOrigin = (self.location && self.location.origin) ? self.location.origin : '';
+try {
+  importScripts(baseOrigin + '/wasm.js');
+} catch (e) {
+  try {
+    importScripts('wasm.js');
+  } catch (err) {
+    console.error('Failed to importScripts wasm.js:', err);
+  }
+}
+
+let wasmInitPromise = null;
+
+async function ensureEngine() {
+  if (wasmInitPromise) return wasmInitPromise;
+  wasmInitPromise = (async () => {
+    const wasmUrl = baseOrigin ? (baseOrigin + '/wasm_bg.wasm') : '/wasm_bg.wasm';
+    await wasm_bindgen(wasmUrl);
+    return wasm_bindgen;
+  })();
+  return wasmInitPromise;
+}
+
+// ---------------------------------------------------------------------------
+// Engine Bridge
+// ---------------------------------------------------------------------------
+function generalCapacity(base, skills = []) {
+  const entity = { General: { uid: 'probe', capacity: 0, skills, unit: { id: base, value: 0, amount: 1 } } };
+  const data = wasm_bindgen.Tooltip.get_data(entity, skills);
+  return data.capacity;
+}
+
+const statsCache = new Map();
+function unitStats(id) {
+  if (statsCache.has(id)) return statsCache.get(id);
+  let d = null;
+  try {
+    d = wasm_bindgen.Tooltip.get_data({ Unit: { id, value: 0, amount: 1 } }, []);
+  } catch (e) { d = null; }
+  statsCache.set(id, d);
+  return d;
+}
+
+function campGarrison(camp) {
+  return {
+    kind: 'Default',
+    hitpoints: camp.hitpoints ?? 250,
+    camp_id: camp.key,
+    camp_type: camp.type,
+    general: null,
+    units: camp.units,
+  };
+}
+
+function attackerGarrison(general, army, unitValues) {
+  return {
+    Garrison: {
+      kind: 'Default',
+      hitpoints: 250,
+      camp_id: '0',
+      camp_type: 'Small',
+      general: {
+        uid: general.uid,
+        skills: general.skills || [],
+        capacity: general.capacity,
+        unit: { id: general.base, value: 0, amount: 1 },
+      },
+      units: army
+        .filter((u) => u.amount > 0)
+        .map((u) => ({ id: u.id, value: unitValues[u.id] ?? 1, amount: u.amount })),
+    },
+  };
+}
+
+function mergePerUnit(target, list, order) {
+  for (const u of list) {
+    if (!target.byId.has(u.id)) {
+      const rec = { id: u.id, lost: 0, max: 0 };
+      target.byId.set(u.id, rec);
+      target.list.push(rec);
+    }
+    const acc = target.byId.get(u.id);
+    acc.lost += u.lost;
+    acc.max += u.max;
+  }
+  return order;
+}
+
+function simulateSquad({ camp, squad, repetitions = 60, unitValues = {}, buffs = [] }) {
+  const attackers = squad.map((s) => attackerGarrison(s.general, s.army, unitValues));
+  const config = { repetitions, skip_by: false, skip_by_victory: false, skip_by_losses: null, buffs };
+  const res = wasm_bindgen.Battles.init(config, attackers, [campGarrison(camp)]).run();
+
+  const waves = res.battle_results.map((br, i) => {
+    const ids = new Set((squad[i] ? squad[i].army : []).map((u) => u.id));
+    return {
+      order: i + 1,
+      generalUid: br.general_uid,
+      victoryChance: br.victory_chance,
+      rounds: br.combat_rounds ? br.combat_rounds.avg : 0,
+      defKills: br.defender.reduce((s, u) => s + u.lost_amount, 0),
+      perUnit: br.attacker
+        .filter((u) => ids.has(u.id))
+        .map((u) => ({ id: u.id, lost: u.lost_amount, max: u.lost.max })),
+    };
+  });
+
+  const agg = { byId: new Map(), list: [] };
+  for (const w of waves) mergePerUnit(agg, w.perUnit);
+
+  return {
+    victoryChance: res.victory_chance,
+    lostAmount: res.lost_amount,
+    lostValue: res.lost_value,
+    xp: res.xp,
+    duration: res.max_duration,
+    waves,
+    perUnit: agg.list,
+  };
+}
+
+function simulateChainCamps({ camps, general, army, repetitions = 60, unitValues = {}, buffs = [] }) {
+  const config = { repetitions, skip_by: false, skip_by_victory: false, skip_by_losses: null, buffs };
+  const ids = new Set(army.map((u) => u.id));
+  const res = wasm_bindgen.Battles.init(
+    config,
+    [attackerGarrison(general, army, unitValues)],
+    camps.map((c) => campGarrison(c)),
+  ).run();
+
+  const perCamp = camps.map(() => null);
+  for (const br of res.battle_results) {
+    const idx = (br.defender_wave || 1) - 1;
+    if (idx < 0 || idx >= camps.length) continue;
+    perCamp[idx] = {
+      camp: camps[idx],
+      victoryChance: br.victory_chance,
+      rounds: br.combat_rounds ? br.combat_rounds.avg : 0,
+      defKills: br.defender.reduce((s, u) => s + u.lost_amount, 0),
+      perUnit: br.attacker
+        .filter((u) => ids.has(u.id))
+        .map((u) => ({ id: u.id, lost: u.lost_amount, max: u.lost.max })),
+    };
+  }
+
+  const agg = { byId: new Map(), list: [] };
+  const remaining = new Map(army.map((u) => [u.id, u.amount]));
+  for (const c of perCamp) {
+    if (!c) continue;
+    c.armyBefore = army
+      .map((u) => ({ id: u.id, amount: Math.max(0, Math.round(remaining.get(u.id) || 0)) }))
+      .filter((u) => u.amount > 0);
+    for (const u of c.perUnit) remaining.set(u.id, (remaining.get(u.id) || 0) - u.lost);
+    mergePerUnit(agg, c.perUnit);
+  }
+
+  const cleared = perCamp.every((c) => c && c.victoryChance === 1);
+
+  return {
+    victoryChance: res.victory_chance,
+    cleared,
+    campsCleared: perCamp.filter((c) => c && c.victoryChance === 1).length,
+    lostAmount: res.lost_amount,
+    lostValue: res.lost_value,
+    xp: res.xp,
+    duration: res.max_duration,
+    perCamp,
+    perUnit: agg.list,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Unit & Resource Metadata
+// ---------------------------------------------------------------------------
 const DEFAULT_UNITS = [
   'Swordsman', 'MountedSwordsman', 'Knight',
   'Marksman', 'ArmoredMarksman', 'MountedMarksman', 'Besieger',
@@ -35,8 +190,6 @@ const ALL_PLAYER_UNITS = [
   'Marksman', 'ArmoredMarksman', 'MountedMarksman', 'Besieger',
 ];
 
-// Units considered cheap enough to be thrown away on an opening wave.
-// Classes that may throw their army away once without going on cooldown (innate 1-UP).
 const DEFAULT_FREE_SACRIFICE_BASES = [
   'GhostGeneral',
   'NarcissisticGeneral',
@@ -48,9 +201,7 @@ const DEFAULT_CHEAP_UNITS = [
   'Bowman', 'Longbowman', 'Crossbowman',
 ];
 
-// Exact barracks resource recipes for player units in The Settlers Online
 const UNIT_RESOURCES = {
-  // Regular Barracks
   Recruit: { Settler: 1, Brew: 5, BronzeSword: 10 },
   Bowman: { Settler: 1, Brew: 5, Bow: 10 },
   Militia: { Settler: 1, Brew: 10, IronSword: 10 },
@@ -60,8 +211,6 @@ const UNIT_RESOURCES = {
   Crossbowman: { Settler: 1, Brew: 20, Crossbow: 10 },
   EliteSoldier: { Settler: 1, Brew: 15, DamasceneSword: 10 },
   Cannoneer: { Settler: 1, Brew: 20, Cannon: 10, Gunpowder: 50 },
-
-  // Elite Barracks
   Swordsman: { Settler: 1, Brew: 5, PlatinumSword: 10 },
   MountedSwordsman: { Settler: 1, Brew: 15, PlatinumSword: 10, BattleHorse: 20 },
   Knight: { Settler: 1, Brew: 15, PlatinumSword: 20, BattleHorse: 20 },
@@ -72,22 +221,9 @@ const UNIT_RESOURCES = {
 };
 
 const DEFAULT_UNIT_VALUES = {
-  Recruit: 1,
-  Bowman: 2,
-  Longbowman: 3,
-  Cavalry: 4,
-  Militia: 5,
-  Soldier: 9,
-  Crossbowman: 50,
-  EliteSoldier: 50,
-  Cannoneer: 100,
-  Swordsman: 50,
-  Marksman: 50,
-  MountedSwordsman: 100,
-  ArmoredMarksman: 100,
-  Knight: 105,
-  MountedMarksman: 120,
-  Besieger: 120,
+  Recruit: 1, Bowman: 2, Longbowman: 3, Cavalry: 4, Militia: 5, Soldier: 9,
+  Crossbowman: 50, EliteSoldier: 50, Cannoneer: 100, Swordsman: 50, Marksman: 50,
+  MountedSwordsman: 100, ArmoredMarksman: 100, Knight: 105, MountedMarksman: 120, Besieger: 120,
 };
 
 function calcLostResources(losses) {
@@ -114,12 +250,6 @@ function resolveCamps(camps, tokens) {
   });
 }
 
-// The game export writes skills as NUMBERS: "skills": { "11": 3 }. Those are
-// slot indexes in the general's skill window, not engine skill names. Glued to
-// their level they became junk like "113", the engine ignored them silently and
-// EVERY general was simulated without skills: no bonus capacity, no bonus
-// damage, so a roster that clears the adventure in two attacks in the game
-// needed an extra wave here.
 function normalizeSkills(raw, skillMap, type, unmapped) {
   const out = [];
   const add = (name, lvl) => {
@@ -141,8 +271,6 @@ function normalizeSkills(raw, skillMap, type, unmapped) {
   return out;
 }
 
-// The game's attack-plan export identifies a general by a numeric class id
-// ("type") and by its localized name. Both are mapped onto engine bases here.
 const GAME_TYPE_BASES = {
   7: 'HalloweenGeneral', 9: 'EasterGeneral', 13: 'MajorGeneral',
   15: 'StarGeneral2', 16: 'StarGeneral3', 33: 'Xmas2019General',
@@ -162,26 +290,16 @@ const BASE_TO_GAME_TYPE = {
 };
 
 const GAME_NAME_BASES = [
-  ['призрачн', 'GhostGeneral'],
-  ['майор', 'MajorGeneral'],
-  ['боевых искусств', 'StarGeneral3'],
-  ['мастер защит', 'StarGeneral2'],
-  ['мастер зашит', 'StarGeneral2'],
-  ['медик', 'MedicGeneral'],
-  ['безумн', 'MadScientistGeneral'],
-  ['щелкунчик', 'NutcrackerGeneral'],
-  ['шелкунчик', 'NutcrackerGeneral'],
-  ['сильван', 'SylvanaGeneral'],
-  ['хуан', 'GeneralJuan'],
-  ['ветеран', 'EasterGeneral'],
-  ['близнец', 'Halloween2019General'],
-  ['решительн', 'ResoluteGeneral'],
-  ['клаус', 'Xmas2019General'],
-  ['жнец', 'HalloweenGeneral'],
-  ['нарцис', 'NarcissisticGeneral'],
-  ['скрыт', 'AssassinGeneral'],
-  ['мери', 'GeneralMary'],
-  ['крис', 'GeneralMary'],
+  ['призрачн', 'GhostGeneral'], ['майор', 'MajorGeneral'],
+  ['боевых искусств', 'StarGeneral3'], ['мастер защит', 'StarGeneral2'],
+  ['мастер зашит', 'StarGeneral2'], ['медик', 'MedicGeneral'],
+  ['безумн', 'MadScientistGeneral'], ['щелкунчик', 'NutcrackerGeneral'],
+  ['шелкунчик', 'NutcrackerGeneral'], ['сильван', 'SylvanaGeneral'],
+  ['хуан', 'GeneralJuan'], ['ветеран', 'EasterGeneral'],
+  ['близнец', 'Halloween2019General'], ['решительн', 'ResoluteGeneral'],
+  ['клаус', 'Xmas2019General'], ['жнец', 'HalloweenGeneral'],
+  ['нарцис', 'NarcissisticGeneral'], ['скрыт', 'AssassinGeneral'],
+  ['мери', 'GeneralMary'], ['крис', 'GeneralMary'],
 ];
 
 function stripHtml(text) {
@@ -205,13 +323,6 @@ function baseFromGameGeneral(name, type, typeMap) {
   return null;
 }
 
-// Accepts three shapes:
-//   1. our own roster file: { specialists: [ { id, name, base, ... } ] }
-//   2. the game's attack-plan export: { "<uid>.0": { name, type, skills, army } }
-//   3. an array of those exports, one entry per wave
-// For 2 and 3 the capacity is taken from the largest army the general actually
-// carried in game. That is exactly what the general's window allowed, so the
-// army sizes come out right without knowing what the numeric skills mean.
 function normalizeExport(raw, warnings) {
   if (!raw || typeof raw !== 'object') return { specialists: [] };
   const list = Array.isArray(raw) ? raw : [raw];
@@ -248,55 +359,34 @@ function normalizeExport(raw, warnings) {
       if (!cur.rawName && atk.name) cur.rawName = atk.name;
       if (!cur.type && atk.type) cur.type = atk.type;
       cur.capacity = Math.max(cur.capacity, total);
-      for (const key of Object.keys(atk.skills || {})) {
-        cur.skills[key] = Math.max(Number(cur.skills[key]) || 0, Number(atk.skills[key]) || 0);
-      }
     }
   }
-  const unknown = [];
   const specialists = [];
-  for (const g of byUid.values()) {
-    const base = baseFromGameGeneral(g.name, g.type, typeMap);
-    if (!base) unknown.push(g.name + ' (type ' + g.type + ')');
-    specialists.push({
-      id: g.uid,
-      name: g.name,
-      rawName: g.rawName || (g.name ? `<b>${g.name}</b>` : null),
-      grid: g.grid != null ? g.grid : 0,
-      base: base || 'General',
-      capacity: g.capacity,
-      skills: g.skills,
-      type: g.type || (base ? BASE_TO_GAME_TYPE[base] : 1),
-    });
+  const unmapped = [];
+  for (const gen of byUid.values()) {
+    const base = baseFromGameGeneral(gen.rawName || gen.name, gen.type, typeMap);
+    if (!base) { unmapped.push(gen.name + ' (type ' + gen.type + ')'); continue; }
+    specialists.push(Object.assign({}, gen, { base }));
   }
-  if (warnings) {
-    warnings.push('Прочитан план атак из игры: ' + specialists.length +
-      ' генералов, вместимость взята из самой большой армии каждого (боевые навыки не учтены).');
-    if (unknown.length) {
-      warnings.push('Не опознан класс генерала: ' + unknown.join('; ') +
-        ' — взят обычный генерал. Добавьте в файл "typeMap": { "63": "GhostGeneral" }.');
-    }
+  if (warnings && unmapped.length) {
+    warnings.push('Пропущены неизвестные генералы: ' + unmapped.join(', '));
   }
-  const out = { specialists };
-  if (!Array.isArray(raw)) {
-    if (raw.skillMap) out.skillMap = raw.skillMap;
-    if (raw.unitValues) out.unitValues = raw.unitValues;
-  }
-  return out;
+  return { specialists };
 }
 
-function buildGenerals(rawExport, warnings) {
-  const exportData = normalizeExport(rawExport, warnings);
-  const skillMap = exportData.skillMap || null;
+function buildGenerals(exportData, warnings) {
+  const norm = normalizeExport(exportData, warnings);
+  const specs = (norm && (norm.specialists || norm.generals)) || [];
+  const skillMap = (norm && norm.skillMap) || (exportData && exportData.skillMap) || null;
   const unmapped = new Set();
-  const generals = (exportData.specialists || []).map((s) => {
-    const skills = normalizeSkills(s.skills, skillMap, s.type, unmapped);
-    const given = Number(s.capacity);
-    const resolvedType = s.type || BASE_TO_GAME_TYPE[s.base] || 1;
+  const generals = specs.map((s, idx) => {
+    const resolvedType = s.type != null ? s.type : (BASE_TO_GAME_TYPE[s.base] || null);
+    const skills = normalizeSkills(s.skills, skillMap, resolvedType, unmapped);
+    const given = Number(s.capacity) || 0;
     return {
-      uid: s.id,
-      name: s.name || s.base,
-      rawName: s.rawName || (s.name ? `<b>${s.name}</b>` : `<b>${s.base}</b>`),
+      uid: s.uid || s.id || ('gen_' + idx),
+      name: s.name || s.base || ('Генерал ' + (idx + 1)),
+      rawName: s.rawName || null,
       grid: s.grid != null ? s.grid : 0,
       type: resolvedType,
       base: s.base,
@@ -305,18 +395,9 @@ function buildGenerals(rawExport, warnings) {
       skillList: s.skills || {},
     };
   });
-  if (warnings && unmapped.size) {
-    warnings.push('Навыки генералов заданы номерами (' +
-      [...unmapped].sort((a, b) => Number(a) - Number(b)).join(', ') +
-      ') — движок такие ключи не понимает, генералы посчитаны БЕЗ навыков (план будет ' +
-      'пессимистичнее реальности). Укажите у генерала "capacity": 230 или добавьте в файл ' +
-      '"skillMap": { "11": "Skill_IncreaseCapacity", "63.3": "Skill_IncreaseHeavyAD" }.');
-  }
   return generals;
 }
 
-// Generals with identical base+skills+capacity are interchangeable, so squads
-// are searched per class and only mapped to concrete generals afterwards.
 function classKey(g) {
   return g.base + '|' + (g.skills || []).slice().sort().join(',') + '|' + g.capacity;
 }
@@ -349,7 +430,6 @@ function candidateArmies(units, capacity, stepPct, pool, maxUnitTypes) {
     const a = cap(u, capacity);
     if (a > 0) push([{ id: u, amount: a }]);
   }
-  // Build one army out of N unit types, clamped by what the warehouse holds.
   const mk = (ids, amounts) => {
     const army = [];
     for (let n = 0; n < ids.length; n++) {
@@ -358,7 +438,7 @@ function candidateArmies(units, capacity, stepPct, pool, maxUnitTypes) {
     }
     if (army.length) push(army);
   };
-  const step = Math.max(1, Math.round((capacity * stepPct) / 100));
+  const step = Math.max(5, Math.round((capacity * stepPct) / 100));
   for (let i = 0; i < units.length; i++) {
     for (let j = i + 1; j < units.length; j++) {
       for (let a = step; a < capacity; a += step) {
@@ -366,19 +446,13 @@ function candidateArmies(units, capacity, stepPct, pool, maxUnitTypes) {
       }
     }
   }
-  // Real players mix THREE unit types in one army: a tank that soaks the hits
-  // plus two damage dealers (140 MountedSwordsman + 100 MountedMarksman +
-  // 30 Besieger). Such armies take camps SOLO that no two-type army can win,
-  // so without them the planner spent two or three generals per camp, ran out
-  // of roster in the middle of a wave and needed an extra wave.
-  const types = Math.max(1, Math.min(Number(maxUnitTypes) || 2, units.length));
-  if (types >= 3) {
-    const big = step * 2;
+  if ((maxUnitTypes || 2) >= 3) {
+    const triple = step * 2;
     for (let i = 0; i < units.length; i++) {
       for (let j = i + 1; j < units.length; j++) {
         for (let k = j + 1; k < units.length; k++) {
-          for (let a = big; a < capacity; a += big) {
-            for (let b = big; a + b < capacity; b += big) {
+          for (let a = triple; a < capacity; a += triple) {
+            for (let b = triple; a + b < capacity; b += triple) {
               mk([units[i], units[j], units[k]], [a, b, capacity - a - b]);
             }
           }
@@ -386,7 +460,7 @@ function candidateArmies(units, capacity, stepPct, pool, maxUnitTypes) {
       }
     }
   }
-  if (types >= 4) {
+  if ((maxUnitTypes || 2) >= 4) {
     const quad = step * 3;
     for (let i = 0; i < units.length; i++) {
       for (let j = i + 1; j < units.length; j++) {
@@ -395,8 +469,7 @@ function candidateArmies(units, capacity, stepPct, pool, maxUnitTypes) {
             for (let a = quad; a < capacity; a += quad) {
               for (let b = quad; a + b < capacity; b += quad) {
                 for (let c = quad; a + b + c < capacity; c += quad) {
-                  mk([units[i], units[j], units[k], units[l]],
-                    [a, b, c, capacity - a - b - c]);
+                  mk([units[i], units[j], units[k], units[l]], [a, b, c, capacity - a - b - c]);
                 }
               }
             }
@@ -414,14 +487,8 @@ function violatesNoLoss(perUnit, noLoss) {
   return perUnit.some((u) => noLoss.includes(u.id) && u.max > 0);
 }
 
-// A step of a squad counts as "sacrificial" when its army is (almost) wiped
-// out. Policy "cheap" allows that only for cheap units, "none" forbids it,
-// "any" allows anything.
 function violatesSacrifice(steps, waves, opts) {
   if (opts.sacrificePolicy === 'any') return false;
-  // Only the opening / pushing waves of a squad can be sacrificial on purpose.
-  // A solo attack, or the finishing wave of a squad, is never a "sacrifice":
-  // there the army dies simply because that is what winning the fight costs.
   for (let i = 0; i < steps.length - 1; i++) {
     const w = waves[i];
     if (!w) continue;
@@ -430,10 +497,6 @@ function violatesSacrifice(steps, waves, opts) {
     const lost = w.perUnit.reduce((s, u) => s + u.max, 0);
     if (lost / total < opts.wipeThreshold) continue;
     if (opts.sacrificePolicy === 'none') return true;
-    // "Go as far as possible" explicitly allows throwing an army away to crack
-    // a camp open, as long as it holds no protected ("no loss") units: two
-    // armies die softening the camp and a third one finishes it. Their cost is
-    // still charged, so on equal reach the cheaper answer still wins.
     if (opts.generalUsage === 'max' &&
       steps[i].army.every((u) => !(opts.noLoss || []).includes(u.id))) continue;
     if (!steps[i].army.every((u) => opts.isCheap(u.id))) return true;
@@ -441,7 +504,6 @@ function violatesSacrifice(steps, waves, opts) {
   return false;
 }
 
-// Losses charged against the stock: worst case by default, average optionally.
 function lossesOf(perUnit, mode) {
   const out = {};
   for (const u of perUnit) {
@@ -461,10 +523,6 @@ function fitsPool(usage, pool) {
   return Object.entries(usage).every(([id, n]) => pool[id] === undefined || n <= pool[id]);
 }
 
-// How hard an option leans on the LIMITED part of the stock. Troops you own in
-// unlimited numbers cost nothing here. Without this, "cheapest by loss value"
-// armies all crowd onto the same scarce units and the wave collapses to a few
-// camps even though unlimited troops were sitting right there.
 function poolPressureOf(usage, limits) {
   let p = 0;
   for (const [id, n] of Object.entries(usage)) {
@@ -515,14 +573,11 @@ function mkSquadOption(chain, res, opts) {
     perUnit: res.perUnit,
     losses: lossesOf(res.perUnit, opts.lossAccounting),
     usage: usageOf(chain.map((s) => s.army)),
-    // Total general capacity spent: lets the planner hand each camp the
-    // WEAKEST general that still wins, keeping the elites for the hard camps.
     capacitySum: chain.reduce((s, x) => s + x.cls.capacity, 0),
     poolPressure: poolPressureOf(usageOf(chain.map((s) => s.army)), opts.limits || {}),
   };
 }
 
-// One general + one army sweeping several consecutive camps.
 function mkChainOption(cls, army, camps, res, opts) {
   return {
     kind: 'chain',
@@ -552,25 +607,12 @@ function mkChainOption(cls, army, camps, res, opts) {
   };
 }
 
-function sortOptions(list) {
-  return list.sort((a, b) => a.generals - b.generals || a.lostValue - b.lostValue);
-}
-
-// How many different general line-ups per camp are carried into the wave
-// planner. This is what lets a wave keep growing: every extra line-up is one
-// more camp that can still be served after the obvious generals are busy.
 const MAX_LINEUP_OPTIONS = 64;
 
 function lineupOf(option) {
   return option.classCounts.map(([c, k]) => c + '×' + k).sort().join('+');
 }
 
-// Keep a DIVERSE shortlist instead of just the cheapest armies. The cover
-// search can only choose from what survives this cut, so it must contain
-// every general line-up that wins the camp, plus armies that spare the limited
-// stock and armies that spare the strong generals.
-// The first entry stays the fewest-generals/cheapest one, because that is what
-// the report shows as "minimum generals" for the camp.
 function keepDiverse(list, n) {
   const picked = [];
   const seen = new Set();
@@ -587,10 +629,6 @@ function keepDiverse(list, n) {
   const by = (f) => list.slice().sort(f);
   const cheapFirst = (a, b) => a.generals - b.generals || a.lostValue - b.lostValue;
 
-  // 1) The cheapest plan for EVERY distinct line-up of generals. Generals with
-  //    the same capacity produce identical armies, so they used to collapse
-  //    into a single option — and the camp became impossible to serve as soon
-  //    as that one general was busy elsewhere, cutting the wave short.
   const best = new Map();
   for (const o of list) {
     const k = lineupOf(o);
@@ -600,7 +638,6 @@ function keepDiverse(list, n) {
   }
   take([...best.values()].sort(cheapFirst), Math.max(n, MAX_LINEUP_OPTIONS));
 
-  // 2) Different trade-offs on top of that.
   const cap = picked.length + n;
   const half = Math.max(1, Math.ceil(n / 2));
   take(by(cheapFirst).slice(0, half), cap);
@@ -611,14 +648,6 @@ function keepDiverse(list, n) {
   return picked;
 }
 
-// ---------------------------------------------------------------------------
-// Squad search for ONE camp.
-// 1) try every single general (fast path, identical to the old behaviour);
-// 2) if nobody can solo it, beam-search chains of 2..maxGeneralsPerCamp.
-// When the sacrifice policy leaves a camp unsolvable, the search is repeated
-// without it and the option is flagged, because taking the camp always beats
-// leaving it behind.
-// ---------------------------------------------------------------------------
 function searchCampOptions(camp, classes, availByClass, pool, opts) {
   const { units, stepPct, reps, verify, unitValues, noLoss, maxGeneralsPerCamp, beam, maxOptions } = opts;
   const squadLimit = opts.generalUsage === 'max' ? 48 : maxOptions;
@@ -648,7 +677,6 @@ function searchCampOptions(camp, classes, availByClass, pool, opts) {
         cls, army,
         defKills: r.waves[0] ? r.waves[0].defKills : 0,
         lostValue: r.lostValue,
-        // Can this army face the full camp without losing a protected unit?
         noLossSafe: !violatesNoLoss(r.perUnit, noLoss),
       });
       if (accept(chain, r)) {
@@ -658,17 +686,12 @@ function searchCampOptions(camp, classes, availByClass, pool, opts) {
     }
   }
   const soloable = solo.length > 0;
-  // If a camp can be soloed by single generals, return solo options immediately.
-  // This saves generals for hard camps and cuts search time by 80%.
   if (soloable) {
     return { options: keepDiverse(solo, soloLimit), soloable: true };
   }
 
-  // --- compose a multi-general attack ---
-  // Opener candidates are non-finishing waves: they must NEVER contain protected units!
   const openerProbes = probes.filter((p) => isOpenerSafe(p.army));
   const byKills = openerProbes.slice().sort((a, b) => b.defKills - a.defKills || a.lostValue - b.lostValue);
-  const byCheap = openerProbes.slice().sort((a, b) => a.lostValue - b.lostValue || b.defKills - a.defKills);
   const uniq = (list, n) => {
     const out = []; const seen = new Set();
     for (const p of list) {
@@ -679,13 +702,10 @@ function searchCampOptions(camp, classes, availByClass, pool, opts) {
     }
     return out;
   };
-  // With the "cheap" policy, give cheap throwaway armies the first shot at the
-  // opener role, so the planner tries to crack the camp without burning elites.
   const cheapProbes = openerProbes
     .filter((p) => p.army.every((u) => opts.isCheap(u.id)))
     .sort((a, b) => b.defKills - a.defKills || a.lostValue - b.lostValue);
   const openerPool = byKills;
-  // Every general class now contributes its own best expendable army as a candidate.
   const perClassBest = (list) => {
     const best = new Map();
     for (const p of list) {
@@ -693,8 +713,7 @@ function searchCampOptions(camp, classes, availByClass, pool, opts) {
       if (!cur || p.defKills > cur.defKills ||
         (p.defKills === cur.defKills && p.lostValue < cur.lostValue)) best.set(p.cls.id, p);
     }
-    return [...best.values()]
-      .sort((a, b) => b.defKills - a.defKills || a.lostValue - b.lostValue);
+    return [...best.values()].sort((a, b) => b.defKills - a.defKills || a.lostValue - b.lostValue);
   };
   const classSpread = perClassBest(openerPool);
   const openers = opts.sacrificePolicy === 'cheap' && cheapProbes.length
@@ -702,8 +721,7 @@ function searchCampOptions(camp, classes, availByClass, pool, opts) {
       beam * 2 + classSpread.length)
     : uniq([...openerPool.slice(0, beam), ...classSpread],
       beam + classSpread.length);
-  // Finishing waves hit a camp that is already half dead, so protected units
-  // can come out untouched there. Keep both families as candidates.
+
   const safeByKills = probes.filter((p) => p.noLossSafe)
     .sort((a, b) => b.defKills - a.defKills || a.lostValue - b.lostValue);
   const allByKills = probes.slice().sort((a, b) => b.defKills - a.defKills || a.lostValue - b.lostValue);
@@ -716,8 +734,6 @@ function searchCampOptions(camp, classes, availByClass, pool, opts) {
 
   const found = [];
   let frontier = openers.map((p) => ({ chain: [p], kills: p.defKills }));
-  // A camp that already has a solo answer only gets paired attacks: searching
-  // deeper squads on every easy camp would blow up the runtime for nothing.
   const kMax = soloable ? Math.min(2, maxGeneralsPerCamp) : maxGeneralsPerCamp;
   for (let k = 2; k <= kMax; k++) {
     if (opts.timeBudgetMs > 0 && (Date.now() - opts.t0) >= opts.timeBudgetMs) break;
@@ -734,8 +750,6 @@ function searchCampOptions(camp, classes, availByClass, pool, opts) {
         next.push({ chain, kills: r.waves.reduce((s, w) => s + w.defKills, 0) });
       }
     }
-    // Verification runs 5-10x more repetitions than screening, so only the
-    // squads worth keeping get verified: the cheapest one per general line-up.
     const bestByLineup = new Map();
     for (const w of winners) {
       const key = w.chain.map((s) => s.cls.id).sort().join('+');
@@ -753,216 +767,84 @@ function searchCampOptions(camp, classes, availByClass, pool, opts) {
     frontier = next.sort((a, b) => b.kills - a.kills).slice(0, Math.max(beam, 4));
     if (!frontier.length) break;
   }
-
-  if (!soloable) return { options: keepDiverse(found, squadLimit), soloable: false };
-  // Keep both families: solo options stay first (so minGenerals reporting and
-  // "min" mode still work), squad options are appended for "max" mode.
-  return {
-    options: [
-      ...keepDiverse(solo, soloLimit),
-      ...keepDiverse(found, squadLimit),
-    ],
-    soloable: true,
-  };
+  return { options: keepDiverse(found, squadLimit), soloable: false };
 }
 
 function findCampOptions(camp, classes, availByClass, pool, opts) {
   const res = searchCampOptions(camp, classes, availByClass, pool, opts);
-  if (res.options.length || opts.sacrificePolicy === 'any') return res;
-  // Fallback: the camp is only takeable with an expensive sacrificial wave.
-  const relaxed = searchCampOptions(camp, classes, availByClass, pool,
-    { ...opts, sacrificePolicy: 'any' });
-  for (const o of relaxed.options) o.sacrificeExempt = true;
-  relaxed.sacrificeExempt = relaxed.options.length > 0;
-  return relaxed;
+  if (res.options.length) return res;
+  if (opts.sacrificePolicy === 'cheap' || opts.sacrificePolicy === 'none') {
+    const relaxed = searchCampOptions(camp, classes, availByClass, pool, {
+      ...opts,
+      sacrificePolicy: 'any',
+    });
+    if (relaxed.options.length) {
+      return {
+        options: relaxed.options.map((o) => ({ ...o, sacrificeExempt: true })),
+        soloable: relaxed.soloable,
+        sacrificeExempt: true,
+      };
+    }
+  }
+  return res;
 }
 
-// Extend solo winners so that ONE general sweeps several consecutive camps.
 function buildChainOptions(window, optionsByCamp, classById, pool, opts) {
-  const bySpanStart = new Map();
-  if (!opts.chainCamps) return bySpanStart;
-  for (let i = 0; i < window.length; i++) {
-    const info = optionsByCamp.get(window[i].key);
-    if (!info || !info.soloable) continue;
-    const seeds = info.options.filter((o) => o.kind === 'squad' && o.generals === 1)
-      .slice(0, opts.chainSeeds);
+  const out = new Map();
+  if (!opts.chainCamps || window.length < 2) return out;
+  const { verify, unitValues, reps } = opts;
+  const isSafe = (perUnit) => !violatesNoLoss(perUnit, opts.noLoss);
+
+  for (let i = 0; i < window.length - 1; i++) {
+    const list = [];
+    const soloOpts = (optionsByCamp.get(window[i].key) || {}).options || [];
+    const seeds = soloOpts
+      .filter((o) => o.kind === 'squad' && o.generals === 1)
+      .slice(0, opts.chainSeeds || 3);
+
     for (const seed of seeds) {
       const cls = classById.get(seed.squad[0].classId);
       if (!cls) continue;
       const army = seed.squad[0].army;
-      for (let j = i + 1; j < window.length; j++) {
-        const camps = window.slice(i, j + 1);
-        const r = simulateChainCamps({
-          camps, general: cls.sample, army, repetitions: opts.reps, unitValues: opts.unitValues,
+      let chainLen = 1;
+      let lastGood = null;
+      while (i + chainLen < window.length) {
+        const sub = window.slice(i, i + chainLen + 1);
+        const quick = simulateChainCamps({
+          camps: sub, general: cls.sample, army, repetitions: reps, unitValues,
         });
-        if (!r.cleared || violatesNoLoss(r.perUnit, opts.noLoss)) break;
+        if (!quick.cleared || !isSafe(quick.perUnit)) break;
         const full = simulateChainCamps({
-          camps, general: cls.sample, army, repetitions: opts.verify, unitValues: opts.unitValues,
+          camps: sub, general: cls.sample, army, repetitions: verify, unitValues,
         });
-        if (!full.cleared || violatesNoLoss(full.perUnit, opts.noLoss)) break;
-        if (!bySpanStart.has(i)) bySpanStart.set(i, []);
-        bySpanStart.get(i).push(mkChainOption(cls, army, camps, full, opts));
+        if (!full.cleared || !isSafe(full.perUnit)) break;
+        lastGood = { camps: sub, res: full };
+        chainLen++;
+      }
+      if (lastGood && lastGood.camps.length >= 2) {
+        list.push(mkChainOption(cls, army, lastGood.camps, lastGood.res, opts));
       }
     }
+    if (list.length) out.set(i, list);
   }
-  return bySpanStart;
+  return out;
 }
 
-// One left-to-right pass, first fitting option wins. Cheap safety net so that
-// a long wave is never dropped just because the exact search ran out of budget.
-function greedyCover(slice, spanOptions, availByClass, pool) {
-  const picks = [];
-  let avail = new Map(availByClass);
-  let poolNow = { ...pool };
-  let i = 0;
-  while (i < slice.length) {
-    let taken = null;
-    for (const opt of (spanOptions.get(i) || [])) {
-      if (i + opt.span > slice.length) continue;
-      const nextAvail = new Map(avail);
-      let ok = true;
-      for (const [cid, n] of opt.classCounts) {
-        const have = nextAvail.get(cid) || 0;
-        if (have < n) { ok = false; break; }
-        nextAvail.set(cid, have - n);
-      }
-      if (!ok || !fitsPool(opt.usage, poolNow)) continue;
-      const nextPool = { ...poolNow };
-      for (const [id, n] of Object.entries(opt.usage)) if (nextPool[id] !== undefined) nextPool[id] -= n;
-      taken = { opt, nextAvail, nextPool };
-      break;
-    }
-    if (!taken) return null;
-    picks.push({ index: i, option: taken.opt });
-    avail = taken.nextAvail;
-    poolNow = taken.nextPool;
-    i += taken.opt.span;
+function pickBetterCover(a, b, mode) {
+  if (!a) return b;
+  if (!b) return a;
+  const genA = a.reduce((s, p) => s + p.option.generals, 0);
+  const genB = b.reduce((s, p) => s + p.option.generals, 0);
+  const valA = a.reduce((s, p) => s + p.option.lostValue, 0);
+  const valB = b.reduce((s, p) => s + p.option.lostValue, 0);
+  if (mode === 'max') {
+    if (genB !== genA) return genB > genA ? b : a;
+    return valB < valA ? b : a;
   }
-  return picks;
+  if (genB !== genA) return genB < genA ? b : a;
+  return valB < valA ? b : a;
 }
 
-// Global general allocation. The plain left-to-right search gets two things
-// wrong: camp 1 grabs the elite generals, and the boss camp at the end is left
-// with whatever is still standing. This pass fixes both:
-//   pass 1 — serve the HARDEST camp first, and give every camp the weakest
-//            general that still wins it while sparing the limited stock;
-//   pass 2 — ('max' mode) put the still idle generals to work, without ever
-//            giving up a camp that pass 1 already secured.
-// Only span-1 options may be reordered, so camp chains stay with bestCover.
-const COVER_STRATEGIES = ['generals', 'economy', 'pressure', 'balanced'];
-
-// Why the last allocation attempt failed. Without this the planner silently
-// takes fewer camps and there is no way to tell whether generals or troops ran
-// out, which is exactly what you need to know to make a wave longer.
-let lastCoverFail = null;
-
-function coverFailReason(list, avail, poolNow) {
-  let classBlocked = false;
-  let poolBlocked = false;
-  for (const opt of list) {
-    const classesOk = opt.classCounts.every(([cid, cnt]) => (avail.get(cid) || 0) >= cnt);
-    const poolOk = fitsPool(opt.usage, poolNow);
-    if (!poolOk) poolBlocked = true;
-    if (!classesOk) classBlocked = true;
-  }
-  if (poolBlocked && !classBlocked) return 'не хватает запаса ограниченных юнитов';
-  if (classBlocked && !poolBlocked) return 'нет свободных генералов нужной вместимости';
-  return 'кончились и свободные генералы, и запас юнитов';
-}
-
-function coverByDifficulty(slice, spanOptions, availByClass, pool, mode, strategy = 'generals') {
-  const n = slice.length;
-  const plain = new Map();
-  for (let i = 0; i < n; i++) {
-    const list = (spanOptions.get(i) || []).filter((o) => o.span === 1);
-    if (!list.length) return null;
-    plain.set(i, list);
-  }
-
-  const hardness = (i) => {
-    const list = plain.get(i);
-    return {
-      need: Math.min(...list.map((o) => o.generals)),
-      cap: Math.min(...list.map((o) => o.capacitySum)),
-      count: list.length,
-    };
-  };
-  const order = [...plain.keys()].sort((a, b) => {
-    const A = hardness(a); const B = hardness(b);
-    return B.need - A.need || B.cap - A.cap || A.count - B.count || a - b;
-  });
-
-  const avail = new Map(availByClass);
-  const poolNow = { ...pool };
-  const chosen = new Map();
-
-  const canTake = (opt) => {
-    for (const [cid, cnt] of opt.classCounts) if ((avail.get(cid) || 0) < cnt) return false;
-    return fitsPool(opt.usage, poolNow);
-  };
-  const apply = (opt, sign) => {
-    for (const [cid, cnt] of opt.classCounts) avail.set(cid, (avail.get(cid) || 0) - sign * cnt);
-    for (const [id, cnt] of Object.entries(opt.usage)) {
-      if (poolNow[id] !== undefined) poolNow[id] -= sign * cnt;
-    }
-  };
-
-  // Which resource runs out first differs per wave: sometimes it is generals,
-  // sometimes the limited troops that every army wants. This choice is what
-  // decides how many camps fit into ONE wave, so all strategies get a shot.
-  const genScale = Math.max(1, [...availByClass.values()].reduce((s, n) => s + n, 0));
-  const cmp = strategy === 'pressure'
-    ? (a, b) => a.poolPressure - b.poolPressure || a.generals - b.generals ||
-      a.lostValue - b.lostValue || a.capacitySum - b.capacitySum
-    : strategy === 'economy'
-      ? (a, b) => a.generals - b.generals || a.capacitySum - b.capacitySum ||
-        a.poolPressure - b.poolPressure || a.lostValue - b.lostValue
-      : strategy === 'balanced'
-        ? (a, b) => (a.poolPressure + a.generals / genScale) -
-          (b.poolPressure + b.generals / genScale) ||
-          a.lostValue - b.lostValue || a.capacitySum - b.capacitySum
-        : (a, b) => a.generals - b.generals || a.poolPressure - b.poolPressure ||
-          a.lostValue - b.lostValue || a.capacitySum - b.capacitySum;
-
-  for (const i of order) {
-    const opt = plain.get(i).slice().sort(cmp).find(canTake);
-    if (!opt) {
-      lastCoverFail = {
-        number: slice[i].number,
-        need: hardness(i).need,
-        reason: coverFailReason(plain.get(i), avail, poolNow),
-      };
-      return null;
-    }
-    chosen.set(i, opt);
-    apply(opt, 1);
-  }
-
-  // The number of camps in this wave is already fixed, so the only thing left
-  // to improve is the price.
-  let improved = true;
-  let rounds = 0;
-  while (improved && rounds++ < 8) {
-    improved = false;
-    for (const i of order) {
-      const cur = chosen.get(i);
-      apply(cur, -1);
-      const better = plain.get(i)
-        .filter((o) => o !== cur && canTake(o) &&
-          (mode === 'max' || o.generals <= cur.generals) &&
-          (o.lostValue < cur.lostValue ||
-            (o.lostValue === cur.lostValue && o.generals < cur.generals)))
-        .sort((a, b) => a.lostValue - b.lostValue || a.generals - b.generals)[0];
-      apply(better || cur, 1);
-      if (better) { chosen.set(i, better); improved = true; }
-    }
-  }
-
-  return [...chosen.entries()].sort((a, b) => a[0] - b[0])
-    .map(([index, option]) => ({ index, option }));
-}
-
-// Backtracking constraint solver (CSP with Dynamic MRV + Forward Checking)
 function backtrackCover(slice, spanOptions, availByClass, pool, mode, budget = 30000) {
   const n = slice.length;
   const plain = [];
@@ -1001,7 +883,6 @@ function backtrackCover(slice, spanOptions, availByClass, pool, mode, budget = 3
     }
     if (nodes++ > budget) return;
 
-    // Dynamic MRV: find the unassigned camp with the FEWEST remaining valid options
     let bestCamp = null;
     let minValidCount = Infinity;
     let bestValidOptions = null;
@@ -1009,7 +890,7 @@ function backtrackCover(slice, spanOptions, availByClass, pool, mode, budget = 3
     for (let i = 0; i < n; i++) {
       if (assigned.has(i)) continue;
       const valid = plain[i].options.filter(canTake);
-      if (valid.length === 0) return; // Forward Checking: dead end reached, prune immediately!
+      if (valid.length === 0) return;
       if (valid.length < minValidCount) {
         minValidCount = valid.length;
         bestCamp = i;
@@ -1020,110 +901,94 @@ function backtrackCover(slice, spanOptions, availByClass, pool, mode, budget = 3
 
     if (bestCamp === null || !bestValidOptions) return;
 
-    // Prefer solo (lowest generals), economy (lowest capacity general), lowest loss value
     const sorted = bestValidOptions.sort((a, b) =>
-      a.generals - b.generals || a.capacitySum - b.capacitySum || a.lostValue - b.lostValue
+      a.generals - b.generals ||
+      a.capacitySum - b.capacitySum ||
+      a.lostValue - b.lostValue
     );
 
-    assigned.add(bestCamp);
     for (const opt of sorted) {
       apply(opt, 1);
       assignment[bestCamp] = opt;
+      assigned.add(bestCamp);
       solve();
+      assigned.delete(bestCamp);
+      assignment[bestCamp] = null;
       apply(opt, -1);
-      if (best && nodes > 3000) break;
     }
-    assigned.delete(bestCamp);
   };
 
   solve();
   return best ? best.picks : null;
 }
 
-// Both covers take the same number of camps, so only HOW they take them can
-// differ: prefer the cheaper plan, then the one that spends fewer generals.
-function pickBetterCover(a, b, mode) {
-  if (!a) return b;
-  if (!b) return a;
-  const score = (picks) => ({
-    generals: picks.reduce((s, p) => s + p.option.generals, 0),
-    value: picks.reduce((s, p) => s + p.option.lostValue, 0),
-  });
-  const A = score(a); const B = score(b);
-  // Both covers take the same number of camps. Saving generals per camp leaves
-  // more generals alive for subsequent waves and avoids wasting pairs on solo camps.
-  if (A.generals !== B.generals) return A.generals < B.generals ? a : b;
-  return A.value <= B.value ? a : b;
-}
+const COVER_STRATEGIES = ['capacitySum', 'pressure', 'cheap', 'scarcity'];
 
-// Cover a contiguous slice of camps: pick options so that general classes and
-// the shared troop pool are respected. The number of camps is already fixed by
-// the caller, so this only decides HOW they are taken:
-//   mode 'min' — fewest generals, then lowest loss value;
-//   mode 'max' — lowest loss value, then fewest generals: the camp count is
-//   already fixed, and reach comes from allowing sacrificial squads.
-function bestCover(slice, spanOptions, availByClass, pool, budget, mode) {
-  const cheapFirst = mode === 'max';
+function coverByDifficulty(slice, spanOptions, availByClass, pool, mode, strategy = 'scarcity') {
   const n = slice.length;
+  const avail = new Map(availByClass);
+  const poolNow = { ...pool };
+  const chosen = new Map();
 
-  // Optimistic bound: the cheapest continuation from position i onwards,
-  // ignoring class and stock limits. Used to prune the "max" search, where a
-  // plain "more generals is worse" cut-off is invalid.
-  const lb = new Array(n + 1).fill(0);
-  for (let i = n - 1; i >= 0; i--) {
-    let b = Infinity;
-    for (const opt of (spanOptions.get(i) || [])) {
-      if (i + opt.span > n) continue;
-      b = Math.min(b, opt.lostValue + lb[i + opt.span]);
-    }
-    lb[i] = Number.isFinite(b) ? b : 0;
-  }
-
-  let best = null;
-  let nodes = 0;
-  let exhausted = false;
-
-  const dfs = (i, avail, poolNow, picks, gens, value) => {
-    if (best) {
-      if (cheapFirst) {
-        if (value + lb[i] > best.value) return;
-      } else if (gens > best.generals ||
-        (gens === best.generals && value >= best.value)) {
-        return;
-      }
-    }
-    if (i === n) {
-      const better = !best || (cheapFirst
-        ? (value < best.value || (value === best.value && gens < best.generals))
-        : (gens < best.generals || (gens === best.generals && value < best.value)));
-      if (better) best = { picks: picks.slice(), generals: gens, value };
-      return;
-    }
-    if (nodes++ > budget) { exhausted = true; return; }
-    for (const opt of (spanOptions.get(i) || [])) {
-      if (i + opt.span > n) continue;
-      let ok = true;
-      const nextAvail = new Map(avail);
-      for (const [cid, cnt] of opt.classCounts) {
-        const have = nextAvail.get(cid) || 0;
-        if (have < cnt) { ok = false; break; }
-        nextAvail.set(cid, have - cnt);
-      }
-      if (!ok) continue;
-      if (!fitsPool(opt.usage, poolNow)) continue;
-      const nextPool = { ...poolNow };
-      for (const [id, cnt] of Object.entries(opt.usage)) if (nextPool[id] !== undefined) nextPool[id] -= cnt;
-      picks.push({ index: i, option: opt });
-      dfs(i + opt.span, nextAvail, nextPool, picks, gens + opt.generals, value + opt.lostValue);
-      picks.pop();
+  const canTake = (opt) => {
+    for (const [cid, cnt] of opt.classCounts) if ((avail.get(cid) || 0) < cnt) return false;
+    return fitsPool(opt.usage, poolNow);
+  };
+  const apply = (opt, sign) => {
+    for (const [cid, cnt] of opt.classCounts) avail.set(cid, (avail.get(cid) || 0) - sign * cnt);
+    for (const [id, cnt] of Object.entries(opt.usage)) {
+      if (poolNow[id] !== undefined) poolNow[id] -= sign * cnt;
     }
   };
-  dfs(0, availByClass, pool, [], 0, 0);
-  if (best) return best.picks;
-  if (!exhausted) return null;
-  return greedyCover(slice, spanOptions, availByClass, pool);
+
+  const plain = [];
+  for (let i = 0; i < n; i++) {
+    const list = (spanOptions.get(i) || []).filter((o) => o.span === 1);
+    if (!list.length) return null;
+    plain.push({ index: i, options: list });
+  }
+
+  const order = plain.slice().sort((a, b) => {
+    const diff = a.options.length - b.options.length;
+    if (diff) return diff;
+    const minA = Math.min(...a.options.map((o) => o.generals));
+    const minB = Math.min(...b.options.map((o) => o.generals));
+    return minB - minA;
+  });
+
+  const pickFor = (list) => {
+    const valid = list.filter(canTake);
+    if (!valid.length) return null;
+    if (strategy === 'capacitySum') {
+      return valid.sort((a, b) => a.generals - b.generals || a.capacitySum - b.capacitySum || a.lostValue - b.lostValue)[0];
+    }
+    if (strategy === 'pressure') {
+      return valid.sort((a, b) => a.generals - b.generals || a.poolPressure - b.poolPressure || a.lostValue - b.lostValue)[0];
+    }
+    if (strategy === 'cheap') {
+      return valid.sort((a, b) => a.generals - b.generals || a.lostValue - b.lostValue)[0];
+    }
+    return valid.sort((a, b) => a.generals - b.generals || a.capacitySum - b.capacitySum || a.lostValue - b.lostValue)[0];
+  };
+
+  for (const { index, options } of order) {
+    const opt = pickFor(options);
+    if (!opt) return null;
+    apply(opt, 1);
+    chosen.set(index, opt);
+  }
+
+  return [...chosen.entries()].sort((a, b) => a[0] - b[0])
+    .map(([index, option]) => ({ index, option }));
 }
 
+function bestCover(slice, spanOptions, availByClass, pool, budget, mode) {
+  return coverByDifficulty(slice, spanOptions, availByClass, pool, mode, 'scarcity');
+}
+
+// ---------------------------------------------------------------------------
+// Main Tactical Plan Function (Worker Version)
+// ---------------------------------------------------------------------------
 function plan(input, onProgress) {
   const {
     adventure,
@@ -1148,28 +1013,21 @@ function plan(input, onProgress) {
     wipeThreshold = 0.9,
     generalUsage = 'min',
     timeBudgetMs = 0,
-    // How many different unit types one army may mix. Real plans use 3
-    // (tank + two damage dealers), which is also the default here.
     maxUnitTypes = 3,
-    // A general whose army is wiped out goes on a 2 hour cooldown in game, so
-    // it cannot take part in the following waves of the same run.
     sacrificeCooldown = true,
-    // These classes may be sacrificed once for free (no cooldown).
     freeSacrificeBases = DEFAULT_FREE_SACRIFICE_BASES,
   } = input;
 
-  // 'max' = employ as many generals as possible per wave (push further),
-  // 'min' = spend as few generals as possible (default, v5 behaviour).
   const usageMode = generalUsage === 'max' ? 'max' : 'min';
-  // "max" explores a wider space, so it gets a bigger search budget.
   const coverBudget = Number(input.coverBudget) > 0
     ? Number(input.coverBudget)
     : (usageMode === 'max' ? 60000 : 20000);
 
   const t0 = Date.now();
-  const camps = adventureCamps && adventureCamps.length
-    ? adventureCamps
-    : loadAdventure(adventure).camps;
+  if (!adventureCamps || !adventureCamps.length) {
+    throw new Error('Данные лагерей приключения не переданы в Web Worker');
+  }
+  const camps = adventureCamps;
   const targets = resolveCamps(camps, campTokens);
   const warnings = [];
   let generals = buildGenerals(generalsExport, warnings);
@@ -1181,8 +1039,6 @@ function plan(input, onProgress) {
   let classes = groupClasses(generals);
   let classById = new Map(classes.map((c) => [c.id, c]));
 
-  // Calculate extra lives (1-UP free sacrifices) per general UID based on
-  // innate base abilities (GhostGeneral, NarcissisticGeneral) and skills (Skill_InstantRecovery).
   const freeSacrificeSet = new Set(freeSacrificeBases || []);
   const extraLivesPerUid = new Map();
   for (const g of generals) {
@@ -1191,12 +1047,10 @@ function plan(input, onProgress) {
     if (g.skills && g.skills.Skill_InstantRecovery) {
       lives += Number(g.skills.Skill_InstantRecovery);
     }
-    // In TSO, extra lives do not stack beyond 1 (max 1 free resurrection per adventure).
     extraLivesPerUid.set(g.uid, Math.min(1, lives));
   }
   const burnedUids = new Set();
 
-  // No limit by default: a squad may use every general you own.
   const raw = input.maxGeneralsPerCamp;
   const requested = (raw === undefined || raw === null || raw === '' ||
     Number(raw) <= 0 || !Number.isFinite(Number(raw))) ? generals.length : Number(raw);
@@ -1224,8 +1078,6 @@ function plan(input, onProgress) {
     if (v !== undefined && v !== null && v !== '') stock[u] = Number(v);
   }
   const initialStock = { ...stock };
-  // Pressure on the limited stock is always measured against the starting
-  // amounts, so options stay comparable from wave to wave.
   opts.limits = initialStock;
 
   const remaining = targets.slice();
@@ -1267,10 +1119,7 @@ function plan(input, onProgress) {
           waveIndex: waves.length + 1,
         });
       }
-      // Every wave starts with all generals free, and units marked "no loss"
-      // never shrink the stock, so the search result for a camp is usually
-      // identical wave after wave. Recomputing it was the single most
-      // expensive thing the planner did.
+
       const cacheKey = camp.key + '|' +
         [...availByClass].map(([k, v]) => k + ':' + v).join(',') + '|' +
         Object.entries(stock).map(([k, v]) => k + ':' + v).join(',');
@@ -1303,12 +1152,6 @@ function plan(input, onProgress) {
       for (let i = 0; i < len; i++) {
         const list = ((optionsByCamp.get(window[i].key) || {}).options || []).slice();
         for (const c of (chainByStart.get(i) || [])) if (i + c.span <= len) list.push(c);
-        // Cheapest first, then the option that spends the fewest generals per
-        // camp. This order serves BOTH modes: a long wave comes from spending
-        // as little as possible on each camp, so that what is left over can
-        // still crack the next one. "Max" mode differs by what it is ALLOWED
-        // to do (sacrificial squads, any number of generals on a hard camp),
-        // not by padding easy camps with extra generals.
         list.sort((a, b) =>
           (a.generals / a.span) - (b.generals / b.span) ||
           a.capacitySum - b.capacitySum ||
@@ -1317,20 +1160,12 @@ function plan(input, onProgress) {
         spanOptions.set(i, list);
       }
       const slice = window.slice(0, len);
-      // Whether a wave fits at all usually depends on which bottleneck is
-      // respected, so every allocation strategy gets a shot before the wave is
-      // declared impossible; the best result wins.
-      lastCoverFail = null;
       const tries = COVER_STRATEGIES.map((s) =>
         coverByDifficulty(slice, spanOptions, availByClass, stock, usageMode, s));
       tries.push(backtrackCover(slice, spanOptions, availByClass, stock, usageMode));
       tries.push(bestCover(slice, spanOptions, availByClass, stock, coverBudget, usageMode));
       chosen = tries.reduce((best, c) => pickBetterCover(best, c, usageMode), null);
       if (chosen) chosenLen = len;
-      else if (lastCoverFail) {
-        failByLen.set(len, lastCoverFail);
-        console.log('FAIL len=' + len + ' fail=' + JSON.stringify(lastCoverFail));
-      }
     }
 
     if (!chosen) {
@@ -1340,7 +1175,7 @@ function plan(input, onProgress) {
         ? 'Лагерь ' + head.number + ': нужен отряд из ' + info.options[0].generals +
           ' генералов, но столько свободных генералов/войск в этой волне нет'
         : 'Лагерь ' + head.number + ' не берётся даже отрядом из ' + maxGeneralsPerCamp +
-          ' генералов (добавь генералов, юниты с фланки��ованием ' +
+          ' генералов (добавь генералов, юниты с фланкированием ' +
           '(ArmoredMarksman/Cavalry) или увеличь запас войск)';
       break;
     }
@@ -1361,27 +1196,16 @@ function plan(input, onProgress) {
       if (option.kind === 'chain') {
         const g = freeByClass.get(option.classId).shift();
         const general = {
-          uid: g.uid,
-          name: g.name,
-          base: g.base,
-          capacity: g.capacity,
-          type: g.type,
-          grid: g.grid,
-          rawName: g.rawName,
-          skills: g.skillList,
+          uid: g.uid, name: g.name, base: g.base, capacity: g.capacity,
+          type: g.type, grid: g.grid, rawName: g.rawName, skills: g.skillList,
         };
         option.perCamp.forEach((pc, t) => {
           const camp = window[index + t];
           attacks.push({
             camp: {
-              number: camp.number,
-              key: camp.key,
-              type: camp.type,
-              sector: camp.sector,
-              building: camp.building || null,
-              coordinates: camp.coordinates || null,
-              position: camp.position || null,
-              units: camp.units,
+              number: camp.number, key: camp.key, type: camp.type, sector: camp.sector,
+              building: camp.building || null, coordinates: camp.coordinates || null,
+              position: camp.position || null, units: camp.units,
             },
             generalsUsed: t === 0 ? 1 : 0,
             chained: true,
@@ -1418,27 +1242,16 @@ function plan(input, onProgress) {
         return {
           ...s,
           general: {
-            uid: g.uid,
-            name: g.name,
-            base: g.base,
-            capacity: g.capacity,
-            type: g.type,
-            grid: g.grid,
-            rawName: g.rawName,
-            skills: g.skillList,
+            uid: g.uid, name: g.name, base: g.base, capacity: g.capacity,
+            type: g.type, grid: g.grid, rawName: g.rawName, skills: g.skillList,
           },
         };
       });
       attacks.push({
         camp: {
-          number: camp.number,
-          key: camp.key,
-          type: camp.type,
-          sector: camp.sector,
-          building: camp.building || null,
-          coordinates: camp.coordinates || null,
-          position: camp.position || null,
-          units: camp.units,
+          number: camp.number, key: camp.key, type: camp.type, sector: camp.sector,
+          building: camp.building || null, coordinates: camp.coordinates || null,
+          position: camp.position || null, units: camp.units,
         },
         generalsUsed: option.generals,
         chained: false,
@@ -1453,13 +1266,9 @@ function plan(input, onProgress) {
         soloable: info(camp.key).soloable,
         sacrificeExempt: !!option.sacrificeExempt,
       });
-      campsTaken++;
+      campsTaken += option.span;
     }
 
-    // Who did we throw away in this wave? An army that is (almost) completely
-    // wiped means the general is dead: 2 hours of cooldown, so it is out for
-    // the rest of the run. Ghost and Narcissistic generals survive their first
-    // sacrifice for free and stay available.
     const burned = [];
     if (sacrificeCooldown) {
       for (const atk of attacks) {
@@ -1474,10 +1283,7 @@ function plan(input, onProgress) {
           if (livesLeft > 0) {
             extraLivesPerUid.set(uid, livesLeft - 1);
             burned.push({
-              uid,
-              name: step.general.name,
-              base: step.general.base,
-              free: true,
+              uid, name: step.general.name, base: step.general.base, free: true,
               livesRemaining: livesLeft - 1,
             });
             continue;
@@ -1525,7 +1331,6 @@ function plan(input, onProgress) {
       if (generals.length !== before) {
         classes = groupClasses(generals);
         classById = new Map(classes.map((c) => [c.id, c]));
-        // Cached camp options were computed with the old class list.
         optionCache.clear();
       }
       if (!generals.length && remaining.length) {
@@ -1573,8 +1378,31 @@ function plan(input, onProgress) {
   };
 }
 
-module.exports = {
-  plan, buildGenerals, resolveCamps, groupClasses,
-  DEFAULT_UNITS, ALL_PLAYER_UNITS, DEFAULT_CHEAP_UNITS,
-  UNIT_RESOURCES, DEFAULT_UNIT_VALUES, calcLostResources,
+// ---------------------------------------------------------------------------
+// Worker Message Dispatcher
+// ---------------------------------------------------------------------------
+self.onmessage = async (e) => {
+  const { type, payload } = e.data || {};
+
+  if (type === 'INIT') {
+    try {
+      await ensureEngine();
+      self.postMessage({ type: 'READY' });
+    } catch (err) {
+      self.postMessage({ type: 'ERROR', error: 'Failed to init WASM: ' + (err.message || String(err)) });
+    }
+    return;
+  }
+
+  if (type === 'START_PLAN') {
+    try {
+      await ensureEngine();
+      const res = plan(payload, (progress) => {
+        self.postMessage({ type: 'PROGRESS', data: progress });
+      });
+      self.postMessage({ type: 'RESULT', data: res });
+    } catch (err) {
+      self.postMessage({ type: 'ERROR', error: err.message || String(err) });
+    }
+  }
 };

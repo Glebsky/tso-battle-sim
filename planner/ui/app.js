@@ -1142,6 +1142,8 @@ function toggleAllGenerals(on) {
 }
 
 // --- Calculation and Tactical Dashboard -------------------------------------
+let CURRENT_WORKER = null;
+
 async function run() {
   const exportData = S.get('generalsExport', null);
   if (!exportData) {
@@ -1163,13 +1165,34 @@ async function run() {
 
   $('run').disabled = true;
   if ($('runMobile')) $('runMobile').disabled = true;
-  
+
+  const cancelHandler = () => {
+    if (CURRENT_WORKER) {
+      try { CURRENT_WORKER.terminate(); } catch (e) {}
+      CURRENT_WORKER = null;
+    }
+    clearInterval(CALC_TIMER);
+    $('run').disabled = false;
+    if ($('runMobile')) $('runMobile').disabled = false;
+    showToast(t('loader.canceled'), 'info');
+    if (LAST_PLAN_RESULT) {
+      renderResult(LAST_PLAN_RESULT);
+    } else {
+      $('out').innerHTML = `
+        <div class="panel-card" style="text-align:center; padding:24px;">
+          <div class="dim" style="font-size:13px;">${t('loader.canceled')}</div>
+        </div>
+      `;
+    }
+  };
+
   // Show skeleton loader and switch view
-  renderSkeletonLoader();
+  renderSkeletonLoader(cancelHandler);
   setMobileTab('results');
 
   const body = {
     adventure: $('adv').value,
+    adventureCamps: window.CAMPS || [],
     camps: campTokens,
     generalsExport: exportData,
     enabledGenerals: S.get('enabledGenerals', GENERALS.map((g) => g.uid)),
@@ -1188,12 +1211,74 @@ async function run() {
     generalUsage: SETTINGS.genUsage,
   };
 
-  try {
-    const res = await (await fetch('/api/plan', {
+  const runViaWorker = () => {
+    return new Promise((resolve, reject) => {
+      try {
+        const worker = new Worker('/planner.worker.js');
+        CURRENT_WORKER = worker;
+
+        worker.onmessage = (e) => {
+          const { type, data, error } = e.data || {};
+          if (type === 'PROGRESS') {
+            updateSkeletonProgress(data);
+          } else if (type === 'RESULT') {
+            worker.terminate();
+            CURRENT_WORKER = null;
+            resolve(data);
+          } else if (type === 'ERROR') {
+            worker.terminate();
+            CURRENT_WORKER = null;
+            reject(new Error(error || 'Worker calculation failed'));
+          }
+        };
+
+        worker.onerror = (err) => {
+          worker.terminate();
+          CURRENT_WORKER = null;
+          reject(err);
+        };
+
+        worker.postMessage({ type: 'START_PLAN', payload: body });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  };
+
+  const runViaApi = async () => {
+    const res = await fetch('/api/plan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    })).json();
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      let errMsg = `Server returned ${res.status}`;
+      try {
+        const parsed = JSON.parse(errText);
+        if (parsed.error) errMsg = parsed.error;
+      } catch (e) {
+        if (errText.includes('FUNCTION_INVOCATION_TIMEOUT')) {
+          errMsg = 'FUNCTION_INVOCATION_TIMEOUT: Превышен лимит времени выполнения на сервере (Vercel). Попробуйте уменьшить число лагерей.';
+        }
+      }
+      throw new Error(errMsg);
+    }
+    return await res.json();
+  };
+
+  try {
+    let res = null;
+    if (typeof Worker !== 'undefined') {
+      try {
+        res = await runViaWorker();
+      } catch (workerErr) {
+        console.warn('Web Worker execution failed, falling back to server API:', workerErr);
+        res = await runViaApi();
+      }
+    } else {
+      res = await runViaApi();
+    }
 
     LAST_PLAN_RESULT = res;
     renderResult(res);
@@ -1201,17 +1286,38 @@ async function run() {
     $('out').innerHTML = `
       <div class="panel-card" style="border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.08);">
         <div style="font-weight:700; color:#f87171; margin-bottom:6px;">${t('result.error.calcTitle')}</div>
-        <div class="dim" style="font-size:13px;">${e.message}</div>
+        <div class="dim" style="font-size:13px; line-height:1.5;">${e.message}</div>
       </div>
     `;
   } finally {
     $('run').disabled = false;
     if ($('runMobile')) $('runMobile').disabled = false;
     clearInterval(CALC_TIMER);
+    CURRENT_WORKER = null;
   }
 }
 
-function renderSkeletonLoader() {
+function updateSkeletonProgress(p) {
+  if (!p) return;
+  const bar = $('calcProgressBar');
+  const pctEl = $('calcProgressPct');
+  const statusEl = $('calcStatusText');
+
+  const pct = Math.max(0, Math.min(100, Math.round(p.pct || 0)));
+  if (bar) bar.style.width = `${pct}%`;
+  if (pctEl) pctEl.textContent = `${pct}%`;
+
+  if (statusEl) {
+    if (p.stage === 'searching' && p.currentCamp) {
+      statusEl.textContent = t('loader.progress', { solved: p.solvedCamps, total: p.totalCamps, pct }) +
+        ` · ${t('loader.campSearching', { num: p.currentCamp })}`;
+    } else if (p.stage === 'wave_done') {
+      statusEl.textContent = t('loader.progress', { solved: p.solvedCamps, total: p.totalCamps, pct });
+    }
+  }
+}
+
+function renderSkeletonLoader(onCancel) {
   let elapsed = 0;
   $('out').innerHTML = `
     <div class="skeleton-loader">
@@ -1229,8 +1335,22 @@ function renderSkeletonLoader() {
           </svg>
         </div>
         <h3 style="font-size:16px; font-weight:700; color:#fff; margin-bottom:4px;">${t('loader.title')}</h3>
-        <p class="muted" style="font-size:13px;">${t('loader.desc')}</p>
-        <div class="font-mono dim" id="calcTimerText" style="font-size:12px; margin-top:8px;">${t('loader.timer', { time: '0.0' })}</div>
+        <p class="muted" style="font-size:13px;" id="calcStatusText">${t('loader.desc')}</p>
+
+        <!-- Live Progress Bar -->
+        <div style="max-width:320px; margin:14px auto 8px auto;">
+          <div style="background:rgba(255,255,255,0.08); border-radius:6px; height:6px; overflow:hidden; position:relative;">
+            <div id="calcProgressBar" style="width:0%; height:100%; background:linear-gradient(90deg, #3b82f6, #60a5fa); transition:width 0.3s ease; border-radius:6px;"></div>
+          </div>
+          <div class="font-mono" id="calcProgressPct" style="font-size:11px; color:#94a3b8; margin-top:6px;">0%</div>
+        </div>
+
+        <div class="font-mono dim" id="calcTimerText" style="font-size:12px; margin-top:4px;">${t('loader.timer', { time: '0.0' })}</div>
+
+        <!-- Cancel Button -->
+        <button id="btnCancelCalc" class="btn" style="margin-top:14px; background:rgba(239,68,68,0.12); color:#f87171; border:1px solid rgba(239,68,68,0.25); font-size:12px; padding:6px 16px; border-radius:6px; cursor:pointer;">
+          ✕ ${t('loader.cancel')}
+        </button>
       </div>
 
       <div class="skeleton-card">
@@ -1247,6 +1367,10 @@ function renderSkeletonLoader() {
       </div>
     </div>
   `;
+
+  if ($('btnCancelCalc') && typeof onCancel === 'function') {
+    $('btnCancelCalc').onclick = onCancel;
+  }
 
   if (!document.getElementById('spin-style')) {
     const st = document.createElement('style');

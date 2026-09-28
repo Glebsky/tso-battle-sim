@@ -142,6 +142,12 @@ const I18N = {
     'loader.title': 'Simulating battles & optimizing armies...',
     'loader.desc': 'Combat simulation and general wave assignment',
     'loader.timer': 'Time: {time}s',
+    'loader.progress': 'Calculated {solved} of {total} camps ({pct}%)',
+    'loader.campSearching': 'Solving camp {num}...',
+    'loader.cancel': 'Cancel calculation',
+    'loader.canceled': 'Calculation canceled by user',
+    'calc.engine.worker': 'In browser (Web Worker, zero timeouts)',
+    'calc.engine.server': 'On server',
 
     // Dashboard Results
     'result.title': 'Tactical Battle Plan',
@@ -376,6 +382,12 @@ const I18N = {
     'loader.title': 'Триває симуляція та підбір армій...',
     'loader.desc': 'Розрахунок боїв та розподіл генералів',
     'loader.timer': 'Час: {time}s',
+    'loader.progress': 'Розраховано {solved} з {total} таборів ({pct}%)',
+    'loader.campSearching': 'Підбір армії для табору {num}...',
+    'loader.cancel': 'Скасувати розрахунок',
+    'loader.canceled': 'Розрахунок скасовано користувачем',
+    'calc.engine.worker': 'У браузері (Web Worker, без таймаутів)',
+    'calc.engine.server': 'На сервері',
 
     // Dashboard Results
     'result.title': 'Тактичний план бою',
@@ -610,6 +622,12 @@ const I18N = {
     'loader.title': 'Идёт симуляция и подбор армий...',
     'loader.desc': 'Расчёт боёв и распределение генералов',
     'loader.timer': 'Время: {time}s',
+    'loader.progress': 'Рассчитано {solved} из {total} лагерей ({pct}%)',
+    'loader.campSearching': 'Подбор армии для лагеря {num}...',
+    'loader.cancel': 'Отменить расчет',
+    'loader.canceled': 'Расчет отменен пользователем',
+    'calc.engine.worker': 'В браузере (Web Worker, без таймаутов)',
+    'calc.engine.server': 'На сервере',
 
     // Dashboard Results
     'result.title': 'Тактический план боя',

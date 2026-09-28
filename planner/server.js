@@ -69,6 +69,7 @@ const MIME_TYPES = {
   '.json': 'application/json; charset=utf-8',
   '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.xml': 'application/xml; charset=utf-8',
+  '.wasm': 'application/wasm',
 };
 
 const server = http.createServer(async (req, res) => {
@@ -144,11 +145,16 @@ const server = http.createServer(async (req, res) => {
       let reqPath = decodeURIComponent(url.pathname);
       if (reqPath === '/' || !reqPath) reqPath = '/index.html';
       const cleanPath = path.normalize(reqPath).replace(/^(\.\.[\/\\])+/, '');
-      const localFile = path.join(UI_DIR, cleanPath);
-      if (localFile.startsWith(UI_DIR) && fs.existsSync(localFile) && fs.statSync(localFile).isFile()) {
-        const ext = path.extname(localFile).toLowerCase();
-        const mime = MIME_TYPES[ext] || 'application/octet-stream';
-        return send(res, 200, fs.readFileSync(localFile), mime);
+      const candidates = [
+        path.join(UI_DIR, cleanPath),
+        path.join(path.resolve(__dirname, '..'), cleanPath),
+      ];
+      for (const localFile of candidates) {
+        if (fs.existsSync(localFile) && fs.statSync(localFile).isFile()) {
+          const ext = path.extname(localFile).toLowerCase();
+          const mime = MIME_TYPES[ext] || 'application/octet-stream';
+          return send(res, 200, fs.readFileSync(localFile), mime);
+        }
       }
     }
 
