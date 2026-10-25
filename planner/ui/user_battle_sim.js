@@ -497,6 +497,13 @@ function exportAdventureCampsCollect(curZone)
 		}
 		if(!bldVector) return camps;
 
+		var myPlayerId = 0;
+		try {
+			if(typeof game !== 'undefined' && game && game.player && typeof game.player.GetPlayerId === 'function') {
+				myPlayerId = game.player.GetPlayerId();
+			}
+		} catch(pIdErr) {}
+
 		bldVector.forEach(function(bld) {
 			try {
 				if(!bld) return;
@@ -505,29 +512,20 @@ function exportAdventureCampsCollect(curZone)
 					bldName = bld.GetBuildingName_string() || "";
 				}
 
-				var isLeader = false;
+				// Skip player general garrisons and general specialists
+				if(/garrison/i.test(bldName) || (bld && bld.mSpecialist)) return;
+
+				// Skip buildings belonging to the active player (storehouses, mayor house, etc.)
 				try {
-					if(typeof bld.IsLeaderCamp === 'function') {
-						isLeader = !!bld.IsLeaderCamp();
-					} else if(bld.mIsLeaderCamp) {
-						isLeader = true;
-					} else if(/leader|boss/i.test(bldName)) {
-						isLeader = true;
-					}
-				} catch(leadErr) {}
-
-				var isBandit = false;
-				if(typeof bld.IsBanditCamp === 'function') {
-					isBandit = bld.IsBanditCamp();
-				} else if(bldName.indexOf("Bandit") >= 0 || bldName.indexOf("Camp") >= 0 || bldName.indexOf("Leader") >= 0 || isLeader) {
-					isBandit = true;
-				}
-
-				if(!isBandit && !isLeader && bldName.indexOf("Bandit") < 0 && bldName.indexOf("Camp") < 0) return;
+					var bldPlayerId = (typeof bld.getPlayerID === 'function') ? bld.getPlayerID() : (typeof bld.GetPlayerID === 'function' ? bld.GetPlayerID() : (bld.mPlayerID || 0));
+					if(myPlayerId > 0 && bldPlayerId === myPlayerId) return;
+				} catch(pErr) {}
 
 				var hp = 1;
 				if(typeof bld.GetHitPoints === 'function') {
 					hp = bld.GetHitPoints();
+				} else if(bld.mHitPoints != null) {
+					hp = bld.mHitPoints;
 				}
 				if(hp <= 0) return;
 
@@ -566,6 +564,38 @@ function exportAdventureCampsCollect(curZone)
 					}
 				}
 
+				var unitCount = 0;
+				for(var uKey in units) {
+					unitCount += units[uKey];
+				}
+
+				var isLeader = false;
+				try {
+					if(typeof bld.IsLeaderCamp === 'function') {
+						isLeader = !!bld.IsLeaderCamp();
+					} else if(bld.mIsLeaderCamp) {
+						isLeader = true;
+					}
+				} catch(leadErr) {}
+				if(!isLeader && /leader|boss|Dark_Castle|WitchTower|Bonechurch|EnchantedCastle|CursedTower|CursedCastle|AuroraTower|Palace.*leader|Residence.*leader|Stronghold.*leader/i.test(bldName)) {
+					isLeader = true;
+				}
+
+				var isBandit = false;
+				try {
+					if(typeof bld.IsBanditCamp === 'function') {
+						isBandit = !!bld.IsBanditCamp();
+					}
+				} catch(bandErr) {}
+
+				var isCampName = isBandit || isLeader ||
+					/bandit|camp|leader|boss|tent_|watchtower|tower|castle|cave_|ruin|crypt|salad|partycrasher|warehouse|residence|outpost|stronghold|fort|tomb|hut|lake|boulder|plant|frostgiant/i.test(bldName);
+
+				// Must either have units inside, or be recognized as a camp building
+				if(unitCount <= 0 && !isCampName) return;
+				// If defeated or empty non-combat building
+				if(unitCount <= 0 && !isLeader && !isBandit) return;
+
 				var locName = "";
 				if(bldName) {
 					locName = getLoca("BUI", bldName, "");
@@ -575,6 +605,9 @@ function exportAdventureCampsCollect(curZone)
 				}
 				if(!locName) locName = bldName;
 
+				var coordX = (grid > 0) ? (grid % 64) : 0;
+				var coordY = (grid > 0) ? Math.floor(grid / 64) : 0;
+
 				camps.push({
 					grid: grid,
 					entryGrid: entryGrid,
@@ -583,7 +616,8 @@ function exportAdventureCampsCollect(curZone)
 					name: locName,
 					isLeader: isLeader,
 					hp: hp,
-					units: units
+					units: units,
+					coordinates: { x: coordX, y: coordY }
 				});
 			} catch(bldErr) {}
 		});

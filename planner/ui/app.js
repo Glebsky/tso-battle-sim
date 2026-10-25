@@ -254,7 +254,7 @@ function updateAdventureSelect(selectedId = null, query = null) {
   $('adv').value = nextVal;
 
   if (changed) {
-    if (LAST_ADVENTURE_SNAPSHOT) {
+    if (LAST_ADVENTURE_SNAPSHOT && !isSameAdventure(nextVal, LAST_ADVENTURE_SNAPSHOT)) {
       LAST_ADVENTURE_SNAPSHOT = null;
       renderAutobitSnapshotBanner();
     }
@@ -494,18 +494,9 @@ async function loadAdventureInfo() {
   const id = $('adv').value;
   if (!id) return;
 
-  if (LAST_ADVENTURE_SNAPSHOT) {
-    const snapKey = (LAST_ADVENTURE_SNAPSHOT.adventureKey || '').toLowerCase();
-    const snapName = (LAST_ADVENTURE_SNAPSHOT.adventureName || '').toLowerCase();
-    const curId = id.toLowerCase();
-    const isSameAdv = snapKey === curId ||
-      (snapKey && curId.includes(snapKey)) ||
-      (snapName && curId.includes(snapName)) ||
-      (snapKey && snapKey.includes(curId));
-    if (!isSameAdv) {
-      LAST_ADVENTURE_SNAPSHOT = null;
-      renderAutobitSnapshotBanner();
-    }
+  if (LAST_ADVENTURE_SNAPSHOT && !isSameAdventure(id, LAST_ADVENTURE_SNAPSHOT)) {
+    LAST_ADVENTURE_SNAPSHOT = null;
+    renderAutobitSnapshotBanner();
   }
 
   const res = await (await fetch('/api/adventure?id=' + encodeURIComponent(id))).json();
@@ -1805,6 +1796,44 @@ function renderResult(r) {
   });
 }
 
+function isSameAdventure(advId, snap) {
+  if (!snap || !advId) return false;
+  const snapKey = (snap.adventureKey || '').toLowerCase();
+  const snapName = (snap.adventureName || '').toLowerCase();
+  const curId = String(advId).toLowerCase();
+  if (snapKey === curId ||
+      (snapKey && curId.includes(snapKey)) ||
+      (snapName && curId.includes(snapName)) ||
+      (snapKey && snapKey.includes(curId))) {
+    return true;
+  }
+  const trans = typeof getAdventureTranslations === 'function' ? getAdventureTranslations(advId) : null;
+  if (trans) {
+    const vals = Object.values(trans).map((v) => String(v).toLowerCase());
+    if (snapKey && vals.includes(snapKey)) return true;
+    if (snapName && vals.includes(snapName)) return true;
+    if (snapKey && vals.some((v) => v.includes(snapKey) || snapKey.includes(v))) return true;
+    if (snapName && vals.some((v) => v.includes(snapName) || snapName.includes(v))) return true;
+  }
+  return false;
+}
+
+const BOSS_BUILDING_PATTERNS = /leader|boss|Dark_Castle|WitchTower|Bonechurch|EnchantedCastle|CursedTower|CursedCastle|AuroraTower|Palace.*leader|Residence.*leader|Stronghold.*leader/i;
+
+function isLeaderOrBossCamp(camp, snapCamp) {
+  if (snapCamp) {
+    if (snapCamp.isLeader) return true;
+    if (snapCamp.buildingKey && BOSS_BUILDING_PATTERNS.test(snapCamp.buildingKey)) return true;
+    if (snapCamp.name && /вожак|босс|ватажок|leader|boss/i.test(snapCamp.name)) return true;
+  }
+  if (camp) {
+    if (camp.isLeader) return true;
+    if (camp.type === 'Leader' || camp.type === 'Boss') return true;
+    if (camp.building && BOSS_BUILDING_PATTERNS.test(camp.building)) return true;
+  }
+  return false;
+}
+
 function findSnapshotCampForAttack(camp) {
   if (!LAST_ADVENTURE_SNAPSHOT || !Array.isArray(LAST_ADVENTURE_SNAPSHOT.camps) || !LAST_ADVENTURE_SNAPSHOT.camps.length) return null;
   const snapCamps = LAST_ADVENTURE_SNAPSHOT.camps;
@@ -1815,6 +1844,8 @@ function findSnapshotCampForAttack(camp) {
     const found = snapCamps.find((sc) => sc.grid === camp.grid);
     if (found) return found;
   }
+
+  const campIsLeader = isLeaderOrBossCamp(camp);
 
   // 2. Match by units composition
   const campUnits = camp.units;
@@ -1842,7 +1873,41 @@ function findSnapshotCampForAttack(camp) {
       if (bySector.length > 0) candidates = bySector;
     }
 
-    for (const sc of candidates) {
+    // Filter by leader/boss status: bosses only match bosses, regular camps only match regular camps
+    const statusFiltered = candidates.filter((sc) => {
+      const scIsLeader = isLeaderOrBossCamp(null, sc);
+      return scIsLeader === campIsLeader;
+    });
+    const checkCandidates = statusFiltered.length > 0 ? statusFiltered : candidates;
+
+    // Check if any candidate matching units also matches coordinates
+    for (const sc of checkCandidates) {
+      const scMap = {};
+      if (Array.isArray(sc.units)) {
+        for (const u of sc.units) {
+          const uid = u && (u.id || u.name);
+          const ucnt = Number(u && (u.count || u.amount || 0));
+          if (uid && ucnt > 0) scMap[uid] = (scMap[uid] || 0) + ucnt;
+        }
+      } else if (sc.units && typeof sc.units === 'object') {
+        for (const [uid, ucnt] of Object.entries(sc.units)) {
+          if (Number(ucnt) > 0) scMap[uid] = (scMap[uid] || 0) + Number(ucnt);
+        }
+      }
+
+      const scKeys = Object.keys(scMap);
+      if (cKeys.length > 0 && cKeys.length === scKeys.length && cKeys.every((k) => cMap[k] === scMap[k])) {
+        if (camp.coordinates && typeof camp.coordinates.x === 'number' && typeof camp.coordinates.y === 'number') {
+          const cx = camp.coordinates.x;
+          const cy = camp.coordinates.y;
+          if (sc.coordinates && sc.coordinates.x === cx && sc.coordinates.y === cy) return sc;
+          if (sc.grid > 0 && (sc.grid % 64 === cx && Math.floor(sc.grid / 64) === cy)) return sc;
+        }
+      }
+    }
+
+    // General unit match
+    for (const sc of checkCandidates) {
       const scMap = {};
       if (Array.isArray(sc.units)) {
         for (const u of sc.units) {
@@ -1863,27 +1928,29 @@ function findSnapshotCampForAttack(camp) {
     }
   }
 
-  // 3. Fallback: match by camp number
-  if (camp.number && camp.number <= snapCamps.length) {
-    return snapCamps[camp.number - 1];
+  // 3. Match by coordinates if available
+  if (camp.coordinates && typeof camp.coordinates.x === 'number' && typeof camp.coordinates.y === 'number') {
+    const cx = camp.coordinates.x;
+    const cy = camp.coordinates.y;
+    const byCoord = snapCamps.find((sc) => {
+      const scIsLeader = isLeaderOrBossCamp(null, sc);
+      if (scIsLeader !== campIsLeader) return false;
+      if (sc.coordinates && sc.coordinates.x === cx && sc.coordinates.y === cy) return true;
+      if (sc.grid > 0) {
+        return (sc.grid % 64 === cx && Math.floor(sc.grid / 64) === cy);
+      }
+      return false;
+    });
+    if (byCoord) return byCoord;
   }
+
+  // 4. Match by explicit camp number ONLY if snapshot camp has a matching number property
+  if (camp.number != null) {
+    const byExplicitNumber = snapCamps.find((sc) => sc.number === camp.number);
+    if (byExplicitNumber) return byExplicitNumber;
+  }
+
   return null;
-}
-
-const BOSS_BUILDING_PATTERNS = /leader|boss|Dark_Castle|WitchTower|Bonechurch|EnchantedCastle|CursedTower|CursedCastle|AuroraTower|Palace.*leader|Residence.*leader|Stronghold.*leader/i;
-
-function isLeaderOrBossCamp(camp, snapCamp) {
-  if (snapCamp) {
-    if (snapCamp.isLeader) return true;
-    if (snapCamp.buildingKey && BOSS_BUILDING_PATTERNS.test(snapCamp.buildingKey)) return true;
-    if (snapCamp.name && /вожак|босс|ватажок|leader|boss/i.test(snapCamp.name)) return true;
-  }
-  if (camp) {
-    if (camp.isLeader) return true;
-    if (camp.type === 'Leader' || camp.type === 'Boss') return true;
-    if (camp.building && BOSS_BUILDING_PATTERNS.test(camp.building)) return true;
-  }
-  return false;
 }
 
 function getCampClientTarget(camp) {
@@ -1905,7 +1972,7 @@ function getCampClientTarget(camp) {
 
   let target = 0;
   if (camp.coordinates && typeof camp.coordinates.x === 'number' && typeof camp.coordinates.y === 'number') {
-    target = camp.coordinates.x + camp.coordinates.y * 68;
+    target = camp.coordinates.x + camp.coordinates.y * 64;
   } else if (camp.position && typeof camp.position.x === 'number' && typeof camp.position.y === 'number') {
     target = camp.number || 0;
   } else {
