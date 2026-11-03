@@ -73,9 +73,17 @@ battle-sim/
 - Provides optimal/greedy general-to-camp matching algorithms for assigning multiple generals across concurrent camps within a wave.
 
 ### `planner/planner.js`
-- The core optimization engine.
-- Implements candidate generation, loss evaluation, `noLoss` constraint checking, and multi-wave progression.
+- The core optimization engine (v6). Lexicographic priorities: **first the fewest waves, then the cheapest losses** (`lostValue`, generals only break ties).
+- **Waves serve arbitrary subsets, not prefixes**: each wave tries to cover EVERY camp in the window; camps the exact cover cannot fit are deferred one at a time (`pickDeferredCamp`) to the next wave instead of truncating the wave at the first hard camp.
+- **Cover suite** (`buildPositionOptions` → `coverByDifficulty` ×4 strategies + `backtrackCover` (CSP, domain-aware MRV) + `bestCover` (exact branch-and-bound over the covered-camp bitmask) → `pickBetterCover`). Options declare the wave positions they cover (`covers`), so chains may take non-adjacent camps.
+- **Chains** (`buildChainOptions`): one general sweeps several camps with its surviving army; camps it cannot clear are skipped, not blocking. Seeds cover every general class; verification runs once on the longest screened chain (shrink-on-fail) instead of re-verifying every prefix. `maxChainLength` caps camps per general (0 = unlimited).
 - Contains the general life cycle and cooldown state machine (`extraLivesPerUid`).
+- **Wave timing** (`hopTravelSec` + per-step `durationSec` from the engine): squad steps and chain camps are sequential, independent attacks run in parallel; `wave.durationSec` is the longest sequence. Travel between chained camps is configurable via `input.timing = { travelSecPerTile, travelBaseSec }` (both default 0).
+- **IMPORTANT**: the same algorithm lives in `planner/ui/planner.worker.js` (the browser path). Any planner change MUST be mirrored there — copy the whole `WAVE COVER … hopTravelSec` block and the `plan()` wave loop. The test `worker:` in `planner/test/run-tests.js` exercises the worker through a Node vm sandbox (`planner/test/worker-harness.js`) and catches desyncs.
+
+### `planner/test/`
+- `run-tests.js` — the regression suite (`npm test`): pure solver tests + end-to-end `plan()` scenarios on synthetic camps (min waves, cheapest plan, chain reuse, timing, constraints) + worker-path regression.
+- `api-smoke.js` — quick API check against a running server (`node planner/test/api-smoke.js` with the server on port 8788).
 
 ### `planner/ui/app.js`
 - Client application running in the browser.
@@ -140,9 +148,19 @@ node --check planner/server.js
 node --check planner/planner.js
 node --check planner/ui/app.js
 node --check planner/ui/i18n.js
+node --check planner/ui/planner.worker.js
 ```
 
-### 2. CLI Smoke Test
+### 2. Automated Regression Tests
+`npm test` runs the wave-planner suite (`planner/test/run-tests.js`):
+- pure cover-solver tests (global optimum, non-adjacent chains, deferral, rollback);
+- end-to-end `plan()` scenarios on synthetic camps: one-wave solutions, chain reuse,
+  squad fallbacks, cheapest-among-equal-waves, wave timing (sequential chains vs
+  parallel attacks), and every user constraint (`noLoss`, `enabledGenerals`,
+  `maxChainLength`, `maxGeneralsPerCamp`);
+- a browser-worker regression test via `planner/test/worker-harness.js`.
+
+### 3. CLI Smoke Test
 Verify that the combat simulator and planner execute properly from the terminal:
 ```bash
 node planner/plan.js "BonabertiBusiness: 1, 2" \
@@ -152,7 +170,7 @@ node planner/plan.js "BonabertiBusiness: 1, 2" \
   --reps 10 --verify 50
 ```
 
-### 3. Server Health & API Check
+### 4. Server Health & API Check
 Start the server and test API endpoints:
 ```bash
 # Start server on background or test port
@@ -161,4 +179,5 @@ PORT=8788 node planner/server.js &
 # Verify endpoints
 curl -s http://localhost:8788/api/meta | grep -o '"adventures":\[[^]]*\]' | head -c 100
 curl -s "http://localhost:8788/api/adventure?id=BonabertiBusiness" | grep -o '"camps":\[[^]]*\]' | head -c 100
+node planner/test/api-smoke.js
 ```

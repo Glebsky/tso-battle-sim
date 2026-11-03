@@ -285,6 +285,7 @@ async function init() {
   $('maxGen').value = S.get('maxGen', 0);
   $('beam').value = S.get('beam', 5);
   $('chain').checked = S.get('chain', false);
+  $('chainLen').value = S.get('chainLen', 0);
 
   // Load Segmented Settings
   SETTINGS.genUsage = S.get('genUsage', 'min');
@@ -418,7 +419,7 @@ async function init() {
   $('presetAll').onclick = () => applyUnitPreset('all');
 
   // Numeric persistence
-  for (const id of ['step', 'reps', 'verify', 'maxGen', 'beam']) {
+  for (const id of ['step', 'reps', 'verify', 'maxGen', 'beam', 'chainLen']) {
     $(id).oninput = () => S.set(id, Number($(id).value));
   }
   $('chain').onchange = () => S.set('chain', $('chain').checked);
@@ -1240,6 +1241,7 @@ async function run() {
     maxGeneralsPerCamp: Number($('maxGen').value) || undefined,
     beam: Number($('beam').value),
     chainCamps: $('chain').checked,
+    maxChainLength: Number($('chainLen').value) || 0,
     sacrificePolicy: SETTINGS.sacrifice,
     generalUsage: SETTINGS.genUsage,
   };
@@ -1421,6 +1423,18 @@ function renderSkeletonLoader(onCancel) {
 
 function fmt(n) {
   return Math.round((n || 0) * 100) / 100;
+}
+
+// Seconds -> "1 ч 2 мин 3 с" (compact, localized units stay numeric-safe).
+function fmtDurationSec(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  if (s < 60) return s + ' c';
+  const m = Math.floor(s / 60);
+  const rest = s % 60;
+  if (m < 60) return rest ? m + ' мин ' + rest + ' c' : m + ' мин';
+  const h = Math.floor(m / 60);
+  const mr = m % 60;
+  return mr ? h + ' ч ' + mr + ' мин' : h + ' ч';
 }
 
 function fmtStockPills(o) {
@@ -1618,6 +1632,7 @@ function renderResult(r) {
           <div class="wave-title-wrap">
             <span class="wave-badge">${t('wave.badge', { num: w.index })}</span>
             <span class="wave-title">${t('wave.campsParallel', { count: w.attacks.length })}</span>
+            ${w.durationSec ? `<span class="summary-pill font-mono" title="${t('wave.durationTip')}">⏱ ${t('wave.duration', { sec: fmtDurationSec(w.durationSec) })}</span>` : ''}
           </div>
           <div class="row gap-xs items-center" style="margin:0;">
             <div class="wave-summary-pills font-mono">
@@ -1688,6 +1703,7 @@ function renderResult(r) {
             <div class="step-stats font-mono">
               <span>${t('atk.killed', { count: s.defKills })}</span>
               <span>${t('atk.rounds', { count: fmt(s.rounds) })}</span>
+              ${s.startSec != null && s.durationSec ? `<span>${t('atk.timing', { start: fmtDurationSec(s.startSec), dur: fmtDurationSec(s.durationSec) })}</span>` : ''}
               <span>${t('atk.stepLosses', { losses: sLost })}</span>
             </div>
           </div>
@@ -1744,6 +1760,14 @@ function renderResult(r) {
           <div>${t('wave.stockAfter', { stock: fmtStockPills(w.stockAfter) })}</div>
         </div>
     `;
+
+    if (w.deferred && w.deferred.length) {
+      html += `
+        <div style="padding:10px 18px; background:rgba(59,130,246,0.08); border-top:1px solid rgba(59,130,246,0.2); font-size:12px; color:#93c5fd;">
+          ${t('wave.deferred', { camps: w.deferred.map((c) => c.number).join(', ') })}
+        </div>
+      `;
+    }
 
     if (w.blocker) {
       html += `

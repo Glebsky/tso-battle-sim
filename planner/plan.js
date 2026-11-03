@@ -4,7 +4,7 @@
 //     --use Swordsman,ArmoredMarksman,MountedMarksman --no-loss Besieger \
 //     --stock Swordsman=400,MountedMarksman=600 --loss-accounting max \
 //     --step 10 --max-generals all --beam 5 --chain-camps 1 --sacrifice cheap \
-//     --general-usage max
+//     --general-usage max --max-chain-length 3
 const fs = require('fs');
 const path = require('path');
 const { plan, DEFAULT_UNITS, DEFAULT_CHEAP_UNITS } = require('./planner');
@@ -56,6 +56,14 @@ const result = plan({
   maxGeneralsPerCamp,
   beam: Number(args.flags.beam || 5),
   chainCamps: on(args.flags['chain-camps']),
+  // --max-chain-length: максимум лагерей на один генерал в цепочке (0 = без лимита)
+  maxChainLength: args.flags['max-chain-length'] ? Number(args.flags['max-chain-length']) : 0,
+  // --travel-sec-per-tile / --travel-base-sec: время перехода между лагерями
+  // цепочки (по умолчанию 0 — учитывается только время боёв)
+  timing: {
+    travelSecPerTile: args.flags['travel-sec-per-tile'] ? Number(args.flags['travel-sec-per-tile']) : 0,
+    travelBaseSec: args.flags['travel-base-sec'] ? Number(args.flags['travel-base-sec']) : 0,
+  },
   // --general-usage max (или --use-all-generals 1): задействовать максимум генералов
   generalUsage: (args.flags['general-usage'] === 'max' || on(args.flags['use-all-generals']))
     ? 'max' : 'min',
@@ -84,7 +92,8 @@ if (args.flags.json) {
 
   for (const w of result.waves) {
     console.log('\n=== Волна ' + w.index + ': ' + w.attacks.length + ' лагерей, ' +
-      w.generalsUsed + '/' + w.generalsAvailable + ' генералов ===');
+      w.generalsUsed + '/' + w.generalsAvailable + ' генералов' +
+      (w.durationSec ? ', ~' + Math.round(w.durationSec) + ' сек' : '') + ' ===');
     console.log('  Гарнизон до волны: ' + fmtStock(w.stockBefore));
     for (const a of w.attacks) {
       let tag = '';
@@ -96,7 +105,9 @@ if (args.flags.json) {
       console.log('    Противник: ' + a.camp.units.map((u) => u.amount + ' ' + u.id).join(', '));
       for (const s of a.squad) {
         console.log('    ' + s.order + ') ' + s.general.name + ' [' + s.general.base +
-          ', вмест. ' + s.general.capacity + '] — ' + s.role);
+          ', вмест. ' + s.general.capacity + '] — ' + s.role +
+          (s.startSec != null ? ' (старт +' + Math.round(s.startSec) + ' сек' +
+            (s.durationSec ? ', бой ~' + Math.round(s.durationSec) + ' сек' : '') + ')' : ''));
         console.log('       Армия: ' + fmtArmy(s.army));
         console.log('       Убито в лагере: ' + s.defKills + ' | раундов ' + f(s.rounds) +
           ' | свои потери: ' + (s.perUnit.filter((u) => u.lost > 0)
@@ -113,6 +124,10 @@ if (args.flags.json) {
     }
     console.log('  Задействовано войск: ' + fmtStock(w.waveUsage));
     console.log('  Списано потерь: ' + fmtStock(w.waveLosses));
+    if ((w.deferred || []).length) {
+      console.log('  Перенесено на следующую волну: лагеря ' +
+        w.deferred.map((c) => c.number).join(', '));
+    }
     if ((w.burned || []).length) {
       console.log('  Слито генералов: ' + w.burned.map((b) => b.name +
         (b.free ? ' (бесплатный слив, остаётся в строю)' : ' (откат 2 ч, дальше не участвует)')).join(', '));

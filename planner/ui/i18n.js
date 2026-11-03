@@ -125,6 +125,10 @@ const I18N = {
     'settings.chain.tooltipTitle': 'General Attack Chain',
     'settings.chain.tooltipBody': 'A general with a single army sequentially defeats multiple camps, keeping surviving troops from battle to battle.',
 
+    'settings.chainLen.label': 'Max camps per general in chain',
+    'settings.chainLen.tooltipTitle': 'Chain length limit',
+    'settings.chainLen.tooltipBody': 'How many camps one general may attack in sequence inside a single wave. 0 = unlimited (the general keeps going while its army survives).',
+
     // Sidebar Bottom Dock & Mobile Bottom Bar
     'dock.queue': 'Queue: <b id="dockQueueCount">{count}</b> camps',
     'dock.run': 'Calculate wave plan',
@@ -267,6 +271,10 @@ const I18N = {
     'wave.armiesUsed': 'Armies deployed: {stock}',
     'wave.lossesDeducted': 'Losses written off: {stock}',
     'wave.blocker': 'Wave ended: camp {num} — {reason} (requires squad of {need} gen.)',
+    'wave.deferred': 'Deferred to the next wave: camps {camps}',
+    'wave.duration': '≈ {sec}',
+    'wave.durationTip': 'Estimated wave duration: independent attacks run in parallel, chain camps and squad steps run in sequence',
+    'atk.timing': 'start +{start} · battle ~{dur}',
 
     // Attack Cards
     'atk.camp': 'Camp {num}',
@@ -456,6 +464,10 @@ const I18N = {
     'settings.chain.tooltipTitle': 'Ланцюжок атак одним генералом',
     'settings.chain.tooltipBody': 'Генерал з однією армією послідовно зачищає кілька таборів поспіль, зберігаючи вцілілих юнітів від бою до бою.',
 
+    'settings.chainLen.label': 'Макс. таборів на генерала в ланцюжку',
+    'settings.chainLen.tooltipTitle': 'Ліміт довжини ланцюжка',
+    'settings.chainLen.tooltipBody': 'Скільки таборів один генерал може атакувати по черзі в межах однієї хвилі. 0 = без ліміту (генерал іде далі, поки виживає його армія).',
+
     // Sidebar Bottom Dock & Mobile Bottom Bar
     'dock.queue': 'Черга: <b id="dockQueueCount">{count}</b> таб.',
     'dock.run': 'Розрахувати план хвиль',
@@ -598,6 +610,10 @@ const I18N = {
     'wave.armiesUsed': 'Виведено армій: {stock}',
     'wave.lossesDeducted': 'Списано втрат: {stock}',
     'wave.blocker': 'Хвиля завершена: табір {num} — {reason} (потрібен загін з {need} ген.)',
+    'wave.deferred': 'Перенесено на наступну хвилю: табори {camps}',
+    'wave.duration': '≈ {sec}',
+    'wave.durationTip': 'Орієнтовна тривалість хвилі: незалежні атаки йдуть паралельно, табори ланцюжка і кроки загону — послідовно',
+    'atk.timing': 'старт +{start} · бій ~{dur}',
 
     // Attack Cards
     'atk.camp': 'Табір {num}',
@@ -787,6 +803,10 @@ const I18N = {
     'settings.chain.tooltipTitle': 'Цепочка атак одним генералом',
     'settings.chain.tooltipBody': 'Генерал с одной армией последовательно зачищает несколько лагерей подряд, сохраняя выживших юнитов от боя к бою.',
 
+    'settings.chainLen.label': 'Макс. лагерей на генерала в цепочке',
+    'settings.chainLen.tooltipTitle': 'Лимит длины цепочки',
+    'settings.chainLen.tooltipBody': 'Сколько лагерей один генерал может атаковать подряд в рамках одной волны. 0 = без лимита (генерал идёт дальше, пока выживает его армия).',
+
     // Sidebar Bottom Dock & Mobile Bottom Bar
     'dock.queue': 'Очередь: <b id="dockQueueCount">{count}</b> лаг.',
     'dock.run': 'Рассчитать план волн',
@@ -929,6 +949,10 @@ const I18N = {
     'wave.armiesUsed': 'Выведено армий: {stock}',
     'wave.lossesDeducted': 'Списано потерь: {stock}',
     'wave.blocker': 'Волна завершена: лагерь {num} — {reason} (требуется отряд из {need} ген.)',
+    'wave.deferred': 'Перенесено на следующую волну: лагеря {camps}',
+    'wave.duration': '≈ {sec}',
+    'wave.durationTip': 'Ориентировочная длительность волны: независимые атаки идут параллельно, лагеря цепочки и шаги отряда — последовательно',
+    'atk.timing': 'старт +{start} · бой ~{dur}',
 
     // Attack Cards
     'atk.camp': 'Лагерь {num}',

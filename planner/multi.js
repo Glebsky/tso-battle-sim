@@ -78,6 +78,8 @@ function simulateSquad({ camp, squad, repetitions = 60, unitValues = {}, buffs =
       generalUid: br.general_uid,
       victoryChance: br.victory_chance,
       rounds: br.combat_rounds ? br.combat_rounds.avg : 0,
+      // Real battle time of this step in seconds, straight from the engine.
+      durationSec: br.duration ? br.duration.avg : 0,
       defKills: br.defender.reduce((s, u) => s + u.lost_amount, 0),
       // only real troops, never the general figure itself
       perUnit: br.attacker
@@ -123,6 +125,8 @@ function simulateChainCamps({ camps, general, army, repetitions = 60, unitValues
       camp: camps[idx],
       victoryChance: br.victory_chance,
       rounds: br.combat_rounds ? br.combat_rounds.avg : 0,
+      // Real battle time of this camp fight in seconds, from the engine.
+      durationSec: br.duration ? br.duration.avg : 0,
       defKills: br.defender.reduce((s, u) => s + u.lost_amount, 0),
       perUnit: br.attacker
         .filter((u) => ids.has(u.id))

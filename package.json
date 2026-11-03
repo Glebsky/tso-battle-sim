@@ -5,6 +5,7 @@
   "type": "commonjs",
   "scripts": {
     "start": "node planner/server.js",
+    "test": "node planner/test/run-tests.js",
     "download:maps": "node planner/download_maps.js"
   }
 }

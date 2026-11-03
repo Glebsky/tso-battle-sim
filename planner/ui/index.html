@@ -3131,6 +3131,20 @@
               </span>
             </span>
           </div>
+
+          <div class="row between" style="margin-top:6px; display:flex; align-items:center; gap:8px;">
+            <span class="has-tooltip">
+              <label for="chainLen" style="cursor:pointer; font-size:12px;" data-i18n="settings.chainLen.label">Max camps per general in chain</label>
+              <span class="tooltip-icon" tabindex="0">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+              </span>
+              <span class="tooltip-popover">
+                <strong data-i18n="settings.chainLen.tooltipTitle">Chain length limit</strong>
+                <span data-i18n="settings.chainLen.tooltipBody">How many camps one general may attack in sequence inside a single wave. 0 = unlimited (the general keeps going while its army survives).</span>
+              </span>
+            </span>
+            <input class="num font-mono" type="number" id="chainLen" value="0" min="0" max="20" style="width:64px;">
+          </div>
         </div>
       </div>
 

@@ -1,25 +1,32 @@
-// Wave planner on top of the real WASM combat engine — v5.
+// Wave planner on top of the real WASM combat engine — v6.
+//
+// Optimization is strictly two-level (lexicographic):
+//   PRIORITY 1 — fewest waves: every wave tries to serve EVERY remaining camp
+//     of the window; camps are deferred one by one only when the exact cover
+//     search fails, instead of truncating the wave at the first hard camp.
+//   PRIORITY 2 — cheapest plan among covers of the same camps: lowest loss
+//     value first, then general economy ('min' keeps generals, 'max' employs
+//     as many as possible).
 //
 // Rules implemented:
-//  * camps are always processed in the exact order the user typed them;
-//  * each wave takes the longest possible contiguous prefix of the remaining
-//    camps (main goal: crack as many camps as possible per wave);
+//  * camps are reported in the order the user typed them, but a wave may take
+//    ANY subset of the remaining camps (all attacks run in parallel);
 //  * a camp may be attacked by SEVERAL generals in sequence (a "squad").
 //    The engine natively chains attacker waves against one camp and carries
 //    defender casualties over, so squads are simulated exactly, not guessed.
 //    This is what makes boss camps (e.g. BanditBoss5, 60000 HP) solvable at
 //    all: no single general can ever out-damage them.
 //    By default the squad size is limited only by how many generals you have.
-//  * optionally (chainCamps) ONE general may take SEVERAL consecutive camps
-//    with the army it has left — the cheapest way to save generals;
+//  * optionally (chainCamps) ONE general may take SEVERAL camps in sequence
+//    with the army it has left — the cheapest way to save generals. The chain
+//    may SKIP camps that other generals take in the same wave, and its length
+//    can be capped (maxChainLength);
 //  * sacrificial waves (an army that dies almost completely to open a camp)
 //    are allowed only with cheap units by default (sacrificePolicy);
 //  * the army stock is shared: every general of one wave draws from the same
 //    pool, and after the wave the pool loses only the casualties;
-//  * among plans with the same number of camps, generalUsage decides:
-//      'min' — fewest generals wins (save generals for other tasks),
-//      'max' — put as many generals to work as possible (push further).
-//    Loss value is the final tie-break in both cases.
+//  * wave timing is computed from the engine's real battle durations: attacks
+//    run in parallel, squad steps and chain camps run sequentially.
 const { loadAdventure, generalCapacity } = require('./engine');
 const { simulateSquad, simulateChainCamps, unitStats } = require('./multi');
 
@@ -531,6 +538,7 @@ function mkSquadOption(chain, res, opts) {
       role: roleOf(i, chain.length),
       defKills: res.waves[i] ? Math.round(res.waves[i].defKills) : 0,
       rounds: res.waves[i] ? res.waves[i].rounds : 0,
+      durationSec: res.waves[i] ? res.waves[i].durationSec || 0 : 0,
       perUnit: res.waves[i] ? res.waves[i].perUnit : [],
     })),
     generals: chain.length,
@@ -548,11 +556,14 @@ function mkSquadOption(chain, res, opts) {
   };
 }
 
-// One general + one army sweeping several consecutive camps.
-function mkChainOption(cls, army, camps, res, opts) {
+// One general + one army sweeping several camps. The camps need NOT be
+// adjacent: the general walks past camps that other generals take in the
+// same wave, so `campsIdx` (window indexes) may skip positions.
+function mkChainOption(cls, army, camps, res, opts, campsIdx) {
   return {
     kind: 'chain',
     span: camps.length,
+    campsIdx: campsIdx || camps.map((_, i) => i),
     classId: cls.id,
     base: cls.sample.base,
     capacity: cls.capacity,
@@ -563,6 +574,7 @@ function mkChainOption(cls, army, camps, res, opts) {
       armyBefore: c.armyBefore || army,
       defKills: Math.round(c.defKills),
       rounds: c.rounds,
+      durationSec: c.durationSec || 0,
       perUnit: c.perUnit,
     })),
     generals: 1,
@@ -810,78 +822,147 @@ function findCampOptions(camp, classes, availByClass, pool, opts) {
   return relaxed;
 }
 
-// Extend solo winners so that ONE general sweeps several consecutive camps.
+// Extend solo winners so that ONE general sweeps several camps. The chain is
+// grown camp by camp and may SKIP a camp the army cannot take (or that other
+// generals will take): only camps the army really clears join the chain.
+// Seeds cover every general class (one army per class), so the chain search
+// is not biased to a single general family.
+// Verification runs once on the longest screened chain and shrinks while it
+// fails, instead of re-verifying every prefix (5-10x fewer heavy sims).
 function buildChainOptions(window, optionsByCamp, classById, pool, opts) {
-  const bySpanStart = new Map();
-  if (!opts.chainCamps) return bySpanStart;
-  for (let i = 0; i < window.length; i++) {
+  const byAnchor = new Map();
+  if (!opts.chainCamps || window.length < 2) return byAnchor;
+  const maxLen = opts.maxChainLength > 0 ? opts.maxChainLength : Infinity;
+  const isSafe = (perUnit) => !violatesNoLoss(perUnit, opts.noLoss);
+  for (let i = 0; i < window.length - 1; i++) {
     const info = optionsByCamp.get(window[i].key);
     if (!info || !info.soloable) continue;
-    const seeds = info.options.filter((o) => o.kind === 'squad' && o.generals === 1)
-      .slice(0, opts.chainSeeds);
+    const soloOpts = (info.options || []).filter((o) => o.kind === 'squad' && o.generals === 1);
+    const seeds = [];
+    const seenClass = new Set();
+    for (const o of soloOpts) {
+      const cid = o.squad[0].classId;
+      if (seenClass.has(cid)) continue;
+      seenClass.add(cid);
+      seeds.push(o);
+      if (seeds.length >= (opts.chainSeeds || 3)) break;
+    }
     for (const seed of seeds) {
       const cls = classById.get(seed.squad[0].classId);
       if (!cls) continue;
       const army = seed.squad[0].army;
+      if (opts.timeBudgetMs > 0 && (Date.now() - opts.t0) >= opts.timeBudgetMs) break;
+      let camps = [window[i]];
+      let idxs = [i];
       for (let j = i + 1; j < window.length; j++) {
-        const camps = window.slice(i, j + 1);
-        const r = simulateChainCamps({
-          camps, general: cls.sample, army, repetitions: opts.reps, unitValues: opts.unitValues,
+        if (camps.length >= maxLen) break;
+        if (opts.timeBudgetMs > 0 && (Date.now() - opts.t0) >= opts.timeBudgetMs) break;
+        const next = [...camps, window[j]];
+        const quick = simulateChainCamps({
+          camps: next, general: cls.sample, army, repetitions: opts.reps, unitValues: opts.unitValues,
         });
-        if (!r.cleared || violatesNoLoss(r.perUnit, opts.noLoss)) break;
+        // Camp j not clearable with the army left (or not loss-safe): the
+        // general walks past it — it stays available for other generals.
+        if (!quick.cleared || !isSafe(quick.perUnit)) continue;
+        camps = next;
+        idxs.push(j);
+      }
+      while (camps.length >= 2) {
+        if (opts.timeBudgetMs > 0 && (Date.now() - opts.t0) >= opts.timeBudgetMs) break;
         const full = simulateChainCamps({
           camps, general: cls.sample, army, repetitions: opts.verify, unitValues: opts.unitValues,
         });
-        if (!full.cleared || violatesNoLoss(full.perUnit, opts.noLoss)) break;
-        if (!bySpanStart.has(i)) bySpanStart.set(i, []);
-        bySpanStart.get(i).push(mkChainOption(cls, army, camps, full, opts));
+        if (full.cleared && isSafe(full.perUnit)) {
+          if (!byAnchor.has(i)) byAnchor.set(i, []);
+          byAnchor.get(i).push(mkChainOption(cls, army, camps, full, opts, idxs));
+          break;
+        }
+        camps = camps.slice(0, -1);
+        idxs = idxs.slice(0, -1);
       }
     }
   }
-  return bySpanStart;
+  return byAnchor;
 }
 
-// One left-to-right pass, first fitting option wins. Cheap safety net so that
-// a long wave is never dropped just because the exact search ran out of budget.
-function greedyCover(slice, spanOptions, availByClass, pool) {
+// ---------------------------------------------------------------------------
+// WAVE COVER: assign every camp of the wave one winning option (solo attack,
+// multi-general squad, or multi-camp chain) so that general classes and the
+// shared troop pool are respected. Options declare the wave positions they
+// COVER (`covers`), so a chain may take camps that are not adjacent.
+// All covers return picks [{ pos, option }] or null when the camps cannot be
+// served at all.
+// ---------------------------------------------------------------------------
+
+// Attach wave positions to camp options. `positions` are window indexes of
+// the camps that should be served by this wave; every option gets `covers`
+// (the positions it takes). Chains only survive when ALL their camps are in
+// the wave; they stay anchored at their first camp.
+function buildPositionOptions(positions, soloByWindowIdx, chainsByAnchor) {
+  const posOfWindow = new Map();
+  positions.forEach((wi, p) => posOfWindow.set(wi, p));
+  const optionsByPos = [];
+  for (let p = 0; p < positions.length; p++) {
+    const wi = positions[p];
+    const list = (soloByWindowIdx.get(wi) || []).map((o) => ({ ...o, covers: [p] }));
+    for (const ch of (chainsByAnchor.get(wi) || [])) {
+      if (!ch.campsIdx.every((x) => posOfWindow.has(x))) continue;
+      list.push({ ...ch, covers: ch.campsIdx.map((x) => posOfWindow.get(x)) });
+    }
+    // Cheapest per camp first: fewest generals per covered camp, then the
+    // weakest generals, then the lowest price.
+    list.sort((a, b) =>
+      (a.generals / a.covers.length) - (b.generals / b.covers.length) ||
+      a.capacitySum - b.capacitySum ||
+      a.lostValue - b.lostValue);
+    optionsByPos.push(list);
+  }
+  return optionsByPos;
+}
+
+// One left-to-right pass over the still-uncovered camps, first fitting option
+// wins. Cheap safety net so that a long wave is never dropped just because
+// the exact search ran out of budget.
+function greedyCover(camps, optionsByPos, availByClass, pool) {
+  const covered = new Array(camps.length).fill(false);
+  const avail = new Map(availByClass);
+  const poolNow = { ...pool };
   const picks = [];
-  let avail = new Map(availByClass);
-  let poolNow = { ...pool };
-  let i = 0;
-  while (i < slice.length) {
+  for (let p = 0; p < camps.length; p++) {
+    if (covered[p]) continue;
     let taken = null;
-    for (const opt of (spanOptions.get(i) || [])) {
-      if (i + opt.span > slice.length) continue;
-      const nextAvail = new Map(avail);
+    for (const opt of optionsByPos[p]) {
+      if (!opt.covers.every((q) => !covered[q])) continue;
       let ok = true;
+      const undone = [];
       for (const [cid, n] of opt.classCounts) {
-        const have = nextAvail.get(cid) || 0;
-        if (have < n) { ok = false; break; }
-        nextAvail.set(cid, have - n);
+        if ((avail.get(cid) || 0) < n) { ok = false; break; }
+        avail.set(cid, (avail.get(cid) || 0) - n);
+        undone.push([cid, n]);
       }
-      if (!ok || !fitsPool(opt.usage, poolNow)) continue;
-      const nextPool = { ...poolNow };
-      for (const [id, n] of Object.entries(opt.usage)) if (nextPool[id] !== undefined) nextPool[id] -= n;
-      taken = { opt, nextAvail, nextPool };
-      break;
+      if (ok && fitsPool(opt.usage, poolNow)) {
+        for (const [id, n] of Object.entries(opt.usage)) {
+          if (poolNow[id] !== undefined) poolNow[id] -= n;
+        }
+        taken = opt;
+        break;
+      }
+      // roll back only what was actually deducted
+      for (const [cid, n] of undone) avail.set(cid, (avail.get(cid) || 0) + n);
     }
     if (!taken) return null;
-    picks.push({ index: i, option: taken.opt });
-    avail = taken.nextAvail;
-    poolNow = taken.nextPool;
-    i += taken.opt.span;
+    for (const q of taken.covers) covered[q] = true;
+    picks.push({ pos: p, option: taken });
   }
   return picks;
 }
 
-// Global general allocation. The plain left-to-right search gets two things
-// wrong: camp 1 grabs the elite generals, and the boss camp at the end is left
-// with whatever is still standing. This pass fixes both:
-//   pass 1 — serve the HARDEST camp first, and give every camp the weakest
-//            general that still wins it while sparing the limited stock;
-//   pass 2 — ('max' mode) put the still idle generals to work, without ever
-//            giving up a camp that pass 1 already secured.
-// Only span-1 options may be reordered, so camp chains stay with bestCover.
+// Global general allocation heuristic. The plain left-to-right search gets
+// two things wrong: camp 1 grabs the elite generals, and the boss camp at the
+// end is left with whatever is still standing. This pass serves the HARDEST
+// camp first and gives every camp the option that respects the strategy
+// (spare generals / spare stock / spare capacity). Chains are first-class
+// candidates: taking 3 camps with 1 general is exactly what saves waves.
 const COVER_STRATEGIES = ['generals', 'economy', 'pressure', 'balanced'];
 
 // Why the last allocation attempt failed. Without this the planner silently
@@ -903,26 +984,27 @@ function coverFailReason(list, avail, poolNow) {
   return 'кончились и свободные генералы, и запас юнитов';
 }
 
-function coverByDifficulty(slice, spanOptions, availByClass, pool, mode, strategy = 'generals') {
-  const n = slice.length;
-  const plain = new Map();
-  for (let i = 0; i < n; i++) {
-    const list = (spanOptions.get(i) || []).filter((o) => o.span === 1);
-    if (!list.length) return null;
-    plain.set(i, list);
-  }
+function coverByDifficulty(camps, optionsByPos, availByClass, pool, mode, strategy = 'generals') {
+  const n = camps.length;
+  const covered = new Array(n).fill(false);
 
   const hardness = (i) => {
-    const list = plain.get(i);
+    const list = optionsByPos[i];
     return {
       need: Math.min(...list.map((o) => o.generals)),
       cap: Math.min(...list.map((o) => o.capacitySum)),
       count: list.length,
+      // An option covering several camps (a chain) keeps the wave alive:
+      // its anchor camp must be served BEFORE the camps it could swallow.
+      spread: Math.max(...list.map((o) => o.covers.length)),
     };
   };
-  const order = [...plain.keys()].sort((a, b) => {
+  const order = [];
+  for (let i = 0; i < n; i++) order.push(i);
+  order.sort((a, b) => {
     const A = hardness(a); const B = hardness(b);
-    return B.need - A.need || B.cap - A.cap || A.count - B.count || a - b;
+    return B.need - A.need || B.spread - A.spread ||
+      B.cap - A.cap || A.count - B.count || a - b;
   });
 
   const avail = new Map(availByClass);
@@ -943,45 +1025,56 @@ function coverByDifficulty(slice, spanOptions, availByClass, pool, mode, strateg
   // Which resource runs out first differs per wave: sometimes it is generals,
   // sometimes the limited troops that every army wants. This choice is what
   // decides how many camps fit into ONE wave, so all strategies get a shot.
-  const genScale = Math.max(1, [...availByClass.values()].reduce((s, n) => s + n, 0));
+  // Options that cover more camps (chains) always come first: they are what
+  // lets one general serve several camps in the same wave.
+  const genScale = Math.max(1, [...availByClass.values()].reduce((s, x) => s + x, 0));
   const cmp = strategy === 'pressure'
-    ? (a, b) => a.poolPressure - b.poolPressure || a.generals - b.generals ||
-      a.lostValue - b.lostValue || a.capacitySum - b.capacitySum
+    ? (a, b) => b.covers.length - a.covers.length || a.generals - b.generals ||
+      a.poolPressure - b.poolPressure || a.lostValue - b.lostValue || a.capacitySum - b.capacitySum
     : strategy === 'economy'
-      ? (a, b) => a.generals - b.generals || a.capacitySum - b.capacitySum ||
+      ? (a, b) => a.generals - b.generals || b.covers.length - a.covers.length ||
+        a.capacitySum - b.capacitySum ||
         a.poolPressure - b.poolPressure || a.lostValue - b.lostValue
       : strategy === 'balanced'
         ? (a, b) => (a.poolPressure + a.generals / genScale) -
           (b.poolPressure + b.generals / genScale) ||
+          b.covers.length - a.covers.length ||
           a.lostValue - b.lostValue || a.capacitySum - b.capacitySum
-        : (a, b) => a.generals - b.generals || a.poolPressure - b.poolPressure ||
+        : (a, b) => a.generals - b.generals || b.covers.length - a.covers.length ||
+          a.poolPressure - b.poolPressure ||
           a.lostValue - b.lostValue || a.capacitySum - b.capacitySum;
 
   for (const i of order) {
-    const opt = plain.get(i).slice().sort(cmp).find(canTake);
+    if (covered[i]) continue;
+    const candidates = optionsByPos[i]
+      .filter((o) => o.covers.every((q) => !covered[q]))
+      .sort(cmp);
+    const opt = candidates.find(canTake);
     if (!opt) {
       lastCoverFail = {
-        number: slice[i].number,
+        number: camps[i].number,
         need: hardness(i).need,
-        reason: coverFailReason(plain.get(i), avail, poolNow),
+        reason: coverFailReason(optionsByPos[i], avail, poolNow),
       };
       return null;
     }
     chosen.set(i, opt);
+    for (const q of opt.covers) covered[q] = true;
     apply(opt, 1);
   }
 
   // The number of camps in this wave is already fixed, so the only thing left
-  // to improve is the price.
+  // to improve is the price. Solo options may be swapped freely; chains stay.
   let improved = true;
   let rounds = 0;
   while (improved && rounds++ < 8) {
     improved = false;
     for (const i of order) {
       const cur = chosen.get(i);
+      if (!cur || cur.covers.length > 1) continue;
       apply(cur, -1);
-      const better = plain.get(i)
-        .filter((o) => o !== cur && canTake(o) &&
+      const better = optionsByPos[i]
+        .filter((o) => o !== cur && o.covers.length === 1 && canTake(o) &&
           (mode === 'max' || o.generals <= cur.generals) &&
           (o.lostValue < cur.lostValue ||
             (o.lostValue === cur.lostValue && o.generals < cur.generals)))
@@ -992,22 +1085,29 @@ function coverByDifficulty(slice, spanOptions, availByClass, pool, mode, strateg
   }
 
   return [...chosen.entries()].sort((a, b) => a[0] - b[0])
-    .map(([index, option]) => ({ index, option }));
+    .map(([pos, option]) => ({ pos, option }));
 }
 
-// Backtracking constraint solver (CSP with Dynamic MRV + Forward Checking)
-function backtrackCover(slice, spanOptions, availByClass, pool, mode, budget = 30000) {
-  const n = slice.length;
-  const plain = [];
+// Backtracking constraint solver (CSP with Dynamic MRV + Forward Checking).
+// Explores the whole assignment space of solo options AND chains, so a
+// globally optimal distribution is found even when a greedy pass would spend
+// the elite generals on the first easy camp.
+function backtrackCover(camps, optionsByPos, availByClass, pool, mode, budget = 30000) {
+  const n = camps.length;
+  for (let i = 0; i < n; i++) if (!optionsByPos[i].length) return null;
+
+  const minLost = new Array(n);
+  let lbTotal = 0;
   for (let i = 0; i < n; i++) {
-    const list = (spanOptions.get(i) || []).filter((o) => o.span === 1);
-    if (!list.length) return null;
-    plain.push({ index: i, options: list });
+    minLost[i] = Math.min(...optionsByPos[i].map((o) => o.lostValue));
+    lbTotal += minLost[i];
   }
 
   const avail = new Map(availByClass);
   const poolNow = { ...pool };
-  const assignment = new Array(n);
+  // chosen: [{pos, option}] — one entry per ANCHOR; a chain covers its other
+  // camps without a separate entry.
+  const chosen = [];
   const assigned = new Set();
   let best = null;
   let nodes = 0;
@@ -1025,56 +1125,84 @@ function backtrackCover(slice, spanOptions, availByClass, pool, mode, budget = 3
 
   const solve = () => {
     if (assigned.size === n) {
-      const picks = assignment.map((opt, index) => ({ index, option: opt }));
+      const picks = chosen.slice();
       const generals = picks.reduce((s, p) => s + p.option.generals, 0);
       const value = picks.reduce((s, p) => s + p.option.lostValue, 0);
-      const better = !best || (generals < best.generals || (generals === best.generals && value < best.value));
+      // Priority 2: cheapest plan wins; generals only break ties (mode-aware).
+      const better = !best || value < best.value ||
+        (value === best.value && (mode === 'max' ? generals > best.generals : generals < best.generals));
       if (better) best = { picks, generals, value };
       return;
     }
     if (nodes++ > budget) return;
+    // Proven optimum: the theoretical price floor has been reached.
+    if (best && best.value <= lbTotal) return;
 
-    // Dynamic MRV: find the unassigned camp with the FEWEST remaining valid options
+    // Dynamic MRV: find the unassigned camp with the FEWEST remaining ways to
+    // be served. A camp can be served by its own options AND by chains
+    // anchored at other camps that cover it — without counting those, the
+    // solver would assign solo options first and kill every chain.
     let bestCamp = null;
-    let minValidCount = Infinity;
+    let minDomain = Infinity;
+    let bestSpread = -1;
     let bestValidOptions = null;
 
     for (let i = 0; i < n; i++) {
       if (assigned.has(i)) continue;
-      const valid = plain[i].options.filter(canTake);
-      if (valid.length === 0) return; // Forward Checking: dead end reached, prune immediately!
-      if (valid.length < minValidCount) {
-        minValidCount = valid.length;
+      const valid = optionsByPos[i].filter((o) =>
+        o.covers.every((q) => !assigned.has(q)) && canTake(o));
+      if (valid.length === 0) return; // Forward Checking: dead end, prune immediately!
+      let domain = valid.length;
+      let spread = valid.reduce((m, o) => Math.max(m, o.covers.length), 0);
+      for (let j = 0; j < n; j++) {
+        if (j === i || assigned.has(j)) continue;
+        for (const o of optionsByPos[j]) {
+          if (o.covers.length > 1 && o.covers.includes(i) &&
+            o.covers.every((q) => q === i || !assigned.has(q)) && canTake(o)) {
+            domain += 1;
+            spread = Math.max(spread, o.covers.length);
+            break;
+          }
+        }
+      }
+      if (domain < minDomain || (domain === minDomain && spread > bestSpread)) {
+        minDomain = domain;
+        bestSpread = spread;
         bestCamp = i;
         bestValidOptions = valid;
-        if (minValidCount === 1) break;
+        if (minDomain === 1 && spread === 1) break;
       }
     }
 
     if (bestCamp === null || !bestValidOptions) return;
 
-    // Prefer solo (lowest generals), economy (lowest capacity general), lowest loss value
+    // Try options that cover MORE camps first (chains keep the wave alive),
+    // then the cheapest — so the first complete solution is already good.
     const sorted = bestValidOptions.sort((a, b) =>
-      a.generals - b.generals || a.capacitySum - b.capacitySum || a.lostValue - b.lostValue
+      b.covers.length - a.covers.length ||
+      a.lostValue - b.lostValue || a.generals - b.generals || a.capacitySum - b.capacitySum
     );
 
-    assigned.add(bestCamp);
     for (const opt of sorted) {
+      const fresh = opt.covers.filter((q) => !assigned.has(q));
       apply(opt, 1);
-      assignment[bestCamp] = opt;
+      chosen.push({ pos: bestCamp, option: opt });
+      for (const q of fresh) assigned.add(q);
       solve();
+      for (const q of fresh) assigned.delete(q);
+      chosen.pop();
       apply(opt, -1);
-      if (best && nodes > 3000) break;
+      if (best && best.value <= lbTotal) return;
+      if (nodes > budget) return;
     }
-    assigned.delete(bestCamp);
   };
 
   solve();
   return best ? best.picks : null;
 }
 
-// Both covers take the same number of camps, so only HOW they take them can
-// differ: prefer the cheaper plan, then the one that spends fewer generals.
+// Both covers serve the same camps, so only HOW they take them can differ:
+// priority 2 — the cheaper plan (loss value) wins; generals only break ties.
 function pickBetterCover(a, b, mode) {
   if (!a) return b;
   if (!b) return a;
@@ -1083,78 +1211,128 @@ function pickBetterCover(a, b, mode) {
     value: picks.reduce((s, p) => s + p.option.lostValue, 0),
   });
   const A = score(a); const B = score(b);
-  // Both covers take the same number of camps. Saving generals per camp leaves
-  // more generals alive for subsequent waves and avoids wasting pairs on solo camps.
-  if (A.generals !== B.generals) return A.generals < B.generals ? a : b;
-  return A.value <= B.value ? a : b;
+  if (A.value !== B.value) return A.value < B.value ? a : b;
+  if (A.generals !== B.generals) {
+    return mode === 'max' ? (A.generals > B.generals ? a : b) : (A.generals < B.generals ? a : b);
+  }
+  return a;
 }
 
-// Cover a contiguous slice of camps: pick options so that general classes and
-// the shared troop pool are respected. The number of camps is already fixed by
-// the caller, so this only decides HOW they are taken:
-//   mode 'min' — fewest generals, then lowest loss value;
-//   mode 'max' — lowest loss value, then fewest generals: the camp count is
-//   already fixed, and reach comes from allowing sacrificial squads.
-function bestCover(slice, spanOptions, availByClass, pool, budget, mode) {
-  const cheapFirst = mode === 'max';
-  const n = slice.length;
+// Exact branch-and-bound over the set of served camps (bitmask). Always takes
+// the LOWEST uncovered camp next, so every cover is enumerated once; chains
+// may cover any set of still-open positions. Prunes with the optimistic
+// per-camp price floor.
+function bestCover(camps, optionsByPos, availByClass, pool, budget, mode) {
+  const n = camps.length;
+  if (n === 0) return [];
+  if (n > 30) return null; // bitmask guard, heuristic covers still ran
 
-  // Optimistic bound: the cheapest continuation from position i onwards,
-  // ignoring class and stock limits. Used to prune the "max" search, where a
-  // plain "more generals is worse" cut-off is invalid.
-  const lb = new Array(n + 1).fill(0);
-  for (let i = n - 1; i >= 0; i--) {
-    let b = Infinity;
-    for (const opt of (spanOptions.get(i) || [])) {
-      if (i + opt.span > n) continue;
-      b = Math.min(b, opt.lostValue + lb[i + opt.span]);
-    }
-    lb[i] = Number.isFinite(b) ? b : 0;
+  const minLost = new Array(n);
+  for (let i = 0; i < n; i++) {
+    if (!optionsByPos[i].length) return null;
+    minLost[i] = Math.min(...optionsByPos[i].map((o) => o.lostValue));
   }
+  const full = (1 << n) - 1;
 
   let best = null;
   let nodes = 0;
   let exhausted = false;
 
-  const dfs = (i, avail, poolNow, picks, gens, value) => {
-    if (best) {
-      if (cheapFirst) {
-        if (value + lb[i] > best.value) return;
-      } else if (gens > best.generals ||
-        (gens === best.generals && value >= best.value)) {
-        return;
-      }
-    }
-    if (i === n) {
-      const better = !best || (cheapFirst
-        ? (value < best.value || (value === best.value && gens < best.generals))
-        : (gens < best.generals || (gens === best.generals && value < best.value)));
-      if (better) best = { picks: picks.slice(), generals: gens, value };
+  const dfs = (mask, value, gens, picks) => {
+    if (best && value + lbRemaining(mask) >= best.value) return;
+    if (mask === full) {
+      best = { picks: picks.slice(), value, gens };
       return;
     }
     if (nodes++ > budget) { exhausted = true; return; }
-    for (const opt of (spanOptions.get(i) || [])) {
-      if (i + opt.span > n) continue;
+    let p = 0;
+    while (mask & (1 << p)) p++;
+    for (const opt of optionsByPos[p]) {
+      let nextMask = mask;
       let ok = true;
-      const nextAvail = new Map(avail);
-      for (const [cid, cnt] of opt.classCounts) {
-        const have = nextAvail.get(cid) || 0;
-        if (have < cnt) { ok = false; break; }
-        nextAvail.set(cid, have - cnt);
+      for (const q of opt.covers) {
+        if (nextMask & (1 << q)) { ok = false; break; }
+        nextMask |= (1 << q);
       }
       if (!ok) continue;
-      if (!fitsPool(opt.usage, poolNow)) continue;
-      const nextPool = { ...poolNow };
-      for (const [id, cnt] of Object.entries(opt.usage)) if (nextPool[id] !== undefined) nextPool[id] -= cnt;
-      picks.push({ index: i, option: opt });
-      dfs(i + opt.span, nextAvail, nextPool, picks, gens + opt.generals, value + opt.lostValue);
+      // feasibility first, then track the class counters and pool imperatively
+      if (!optionFits(opt)) continue;
+      applyOption(opt, 1);
+      picks.push({ pos: p, option: opt });
+      dfs(nextMask, value + opt.lostValue, gens + opt.generals, picks);
       picks.pop();
+      applyOption(opt, -1);
     }
   };
-  dfs(0, availByClass, pool, [], 0, 0);
+
+  const lbRemaining = (mask) => {
+    let s = 0;
+    for (let i = 0; i < n; i++) if (!(mask & (1 << i))) s += minLost[i];
+    return s;
+  };
+
+  const avail = new Map(availByClass);
+  const poolNow = { ...pool };
+  const optionFits = (opt) => {
+    for (const [cid, cnt] of opt.classCounts) if ((avail.get(cid) || 0) < cnt) return false;
+    return fitsPool(opt.usage, poolNow);
+  };
+  const applyOption = (opt, sign) => {
+    for (const [cid, cnt] of opt.classCounts) avail.set(cid, (avail.get(cid) || 0) - sign * cnt);
+    for (const [id, cnt] of Object.entries(opt.usage)) {
+      if (poolNow[id] !== undefined) poolNow[id] -= sign * cnt;
+    }
+  };
+
+  dfs(0, 0, 0, []);
   if (best) return best.picks;
   if (!exhausted) return null;
-  return greedyCover(slice, spanOptions, availByClass, pool);
+  return greedyCover(camps, optionsByPos, availByClass, pool);
+}
+
+// Which camp should be deferred to the next wave when the full set cannot be
+// covered: the camp that is hardest to serve alongside the others — fewest
+// options that still fit the free resources, or the biggest general demand.
+function pickDeferredCamp(camps, optionsByPos, availByClass, pool) {
+  const avail = new Map(availByClass);
+  const poolNow = { ...pool };
+  let worst = -1;
+  let worstKey = null;
+  for (let p = 0; p < camps.length; p++) {
+    const list = optionsByPos[p];
+    const takeable = list.filter((o) =>
+      o.classCounts.every(([cid, cnt]) => (avail.get(cid) || 0) >= cnt) &&
+      fitsPool(o.usage, poolNow)).length;
+    const minGen = list.length ? Math.min(...list.map((o) => o.generals)) : Infinity;
+    // Higher key = defer first: unservable, then most constrained, then the
+    // most general-hungry; ties defer the camp that comes later.
+    const key = (list.length === 0 ? 1e9 : 0) +
+      (1e6 - takeable * 1000) +
+      minGen * 10 + p;
+    if (worstKey === null || key > worstKey) { worstKey = key; worst = p; }
+  }
+  return worst;
+}
+
+
+// Travel time between two camps of a chain, in seconds. Real game path
+// distances are used when the export carries them; otherwise the straight
+// coordinate distance times travelSecPerTile. Both coefficients default to 0
+// (pure battle timing) because general movement speed is player-specific.
+function hopTravelSec(fromCamp, toCamp, timing) {
+  if (!timing || (!timing.travelSecPerTile && !timing.travelBaseSec)) return 0;
+  let dist = 0;
+  if (fromCamp && toCamp) {
+    const real = fromCamp.distancesToOtherCamps &&
+      toCamp.grid != null && fromCamp.distancesToOtherCamps[toCamp.grid];
+    if (real) dist = Number(real) || 0;
+    else if (fromCamp.coordinates && toCamp.coordinates) {
+      const dx = fromCamp.coordinates.x - toCamp.coordinates.x;
+      const dy = fromCamp.coordinates.y - toCamp.coordinates.y;
+      dist = Math.sqrt(dx * dx + dy * dy);
+    }
+  }
+  return (timing.travelBaseSec || 0) + (timing.travelSecPerTile || 0) * dist;
 }
 
 function plan(input, onProgress) {
@@ -1189,6 +1367,12 @@ function plan(input, onProgress) {
     sacrificeCooldown = true,
     // These classes may be sacrificed once for free (no cooldown).
     freeSacrificeBases = DEFAULT_FREE_SACRIFICE_BASES,
+    // Cap on how many camps ONE general may take in a chain (0 = unlimited).
+    maxChainLength = 0,
+    // Wave timing model: battle durations come from the engine; travel time
+    // between the camps of a chain can be added on top. travelSecPerTile uses
+    // camp coordinates (or real game distances when the export carries them).
+    timing = {},
   } = input;
 
   // 'max' = employ as many generals as possible per wave (push further),
@@ -1243,13 +1427,17 @@ function plan(input, onProgress) {
   const maxGeneralsPerCamp = Math.max(1, Math.min(requested, generals.length));
 
   const cheapSet = new Set(cheapUnits);
+  const timingOpts = {
+    travelSecPerTile: Number(timing.travelSecPerTile) || 0,
+    travelBaseSec: Number(timing.travelBaseSec) || 0,
+  };
   const opts = {
     units, noLoss,
     unitValues: Object.keys(unitValues || {}).length ? { ...DEFAULT_UNIT_VALUES, ...unitValues } : DEFAULT_UNIT_VALUES,
     stepPct, reps, verify, lossAccounting,
     maxUnitTypes,
     maxGeneralsPerCamp, beam, maxOptions,
-    chainCamps, chainSeeds,
+    chainCamps, chainSeeds, maxChainLength,
     sacrificePolicy, wipeThreshold,
     generalUsage: usageMode,
     limits: {},
@@ -1268,7 +1456,7 @@ function plan(input, onProgress) {
   // amounts, so options stay comparable from wave to wave.
   opts.limits = initialStock;
 
-  const remaining = targets.slice();
+  let remaining = targets.slice();
   const waves = [];
   const optionCache = new Map();
   const campInfo = new Map();
@@ -1333,44 +1521,47 @@ function plan(input, onProgress) {
       break;
     }
 
-    const chainByStart = buildChainOptions(window, optionsByCamp, classById, stock, opts);
+    const chainsByAnchor = buildChainOptions(window, optionsByCamp, classById, stock, opts);
+    const soloByWindowIdx = new Map();
+    for (let wi = 0; wi < window.length; wi++) {
+      soloByWindowIdx.set(wi, (optionsByCamp.get(window[wi].key) || {}).options || []);
+    }
 
+    // PRIORITY 1 — serve as many camps as possible in THIS wave. Start with
+    // every camp of the window; only when the exact cover search fails are the
+    // least servable camps deferred to the next wave. This is what keeps the
+    // plan at the minimum number of waves: a hard camp in the middle no longer
+    // pushes every later camp into an extra wave.
+    let positions = window.map((_, wi) => wi);
     let chosen = null;
-    let chosenLen = 0;
-    const failByLen = new Map();
-    for (let len = window.length; len >= 1 && !chosen; len--) {
-      const spanOptions = new Map();
-      for (let i = 0; i < len; i++) {
-        const list = ((optionsByCamp.get(window[i].key) || {}).options || []).slice();
-        for (const c of (chainByStart.get(i) || [])) if (i + c.span <= len) list.push(c);
-        // Cheapest first, then the option that spends the fewest generals per
-        // camp. This order serves BOTH modes: a long wave comes from spending
-        // as little as possible on each camp, so that what is left over can
-        // still crack the next one. "Max" mode differs by what it is ALLOWED
-        // to do (sacrificial squads, any number of generals on a hard camp),
-        // not by padding easy camps with extra generals.
-        list.sort((a, b) =>
-          (a.generals / a.span) - (b.generals / b.span) ||
-          a.capacitySum - b.capacitySum ||
-          a.lostValue - b.lostValue
-        );
-        spanOptions.set(i, list);
+    const deferredIdx = [];
+    let deferredReason = null;
+    while (positions.length) {
+      if (timeBudgetMs > 0 && (Date.now() - t0) >= timeBudgetMs) {
+        timedOut = true;
+        break;
       }
-      const slice = window.slice(0, len);
+      const waveCamps = positions.map((wi) => window[wi]);
+      const optionsByPos = buildPositionOptions(positions, soloByWindowIdx, chainsByAnchor);
       // Whether a wave fits at all usually depends on which bottleneck is
       // respected, so every allocation strategy gets a shot before the wave is
       // declared impossible; the best result wins.
       lastCoverFail = null;
       const tries = COVER_STRATEGIES.map((s) =>
-        coverByDifficulty(slice, spanOptions, availByClass, stock, usageMode, s));
-      tries.push(backtrackCover(slice, spanOptions, availByClass, stock, usageMode));
-      tries.push(bestCover(slice, spanOptions, availByClass, stock, coverBudget, usageMode));
+        coverByDifficulty(waveCamps, optionsByPos, availByClass, stock, usageMode, s));
+      tries.push(backtrackCover(waveCamps, optionsByPos, availByClass, stock, usageMode));
+      tries.push(bestCover(waveCamps, optionsByPos, availByClass, stock, coverBudget, usageMode));
       chosen = tries.reduce((best, c) => pickBetterCover(best, c, usageMode), null);
-      if (chosen) chosenLen = len;
-      else if (lastCoverFail) {
-        failByLen.set(len, lastCoverFail);
-        console.log('FAIL len=' + len + ' fail=' + JSON.stringify(lastCoverFail));
-      }
+      if (chosen) break;
+      if (positions.length === 1) break;
+      if (!deferredReason && lastCoverFail) deferredReason = lastCoverFail;
+      const dropPos = pickDeferredCamp(waveCamps, optionsByPos, availByClass, stock);
+      deferredIdx.push(positions[dropPos]);
+      positions.splice(dropPos, 1);
+    }
+    if (timedOut) {
+      stopReason = 'Превышен лимит времени выполнения (' + Math.round(timeBudgetMs / 1000) + ' сек). Рассчитано волн: ' + waves.length;
+      break;
     }
 
     if (!chosen) {
@@ -1389,9 +1580,10 @@ function plan(input, onProgress) {
     const waveLosses = {};
     const freeByClass = new Map(classes.map((c) => [c.id, c.members.slice()]));
     const attacks = [];
-    let campsTaken = 0;
+    const takenWindowIdx = [];
+    let waveEndSec = 0;
 
-    for (const { index, option } of chosen) {
+    for (const { pos, option } of chosen) {
       const info = (k) => campInfo.get(k) || {};
       for (const [id, n] of Object.entries(option.losses)) {
         waveLosses[id] = (waveLosses[id] || 0) + n;
@@ -1410,8 +1602,20 @@ function plan(input, onProgress) {
           rawName: g.rawName,
           skills: g.skillList,
         };
-        option.perCamp.forEach((pc, t) => {
-          const camp = window[index + t];
+        // The general walks its camps one after another: battle times and
+        // travel between the camps accumulate into one sequence.
+        let seqSec = 0;
+        let prevCamp = null;
+        option.campsIdx.forEach((cwi, t) => {
+          const camp = window[cwi];
+          if (prevCamp) seqSec += hopTravelSec(prevCamp, camp, timingOpts);
+          const startSec = seqSec;
+          const pc = option.perCamp[t];
+          const dur = pc.durationSec || 0;
+          seqSec += dur;
+          waveEndSec = Math.max(waveEndSec, seqSec);
+          prevCamp = camp;
+          takenWindowIdx.push(cwi);
           attacks.push({
             camp: {
               number: camp.number,
@@ -1426,7 +1630,7 @@ function plan(input, onProgress) {
             generalsUsed: t === 0 ? 1 : 0,
             chained: true,
             chainIndex: t + 1,
-            chainTotal: option.span,
+            chainTotal: option.campsIdx.length,
             chainCamps: option.perCamp.map((x) => x.campNumber),
             squad: [{
               order: 1,
@@ -1435,6 +1639,8 @@ function plan(input, onProgress) {
               army: pc.armyBefore,
               defKills: pc.defKills,
               rounds: pc.rounds,
+              durationSec: dur,
+              startSec,
               perUnit: pc.perUnit,
             }],
             army: pc.armyBefore,
@@ -1446,17 +1652,28 @@ function plan(input, onProgress) {
             losses: t === 0 ? option.losses : {},
             soloable: info(camp.key).soloable,
             sacrificeExempt: !!option.sacrificeExempt,
+            startSec,
+            durationSec: dur,
+            endSec: seqSec,
           });
-          campsTaken++;
         });
         continue;
       }
 
-      const camp = window[index];
+      const camp = window[positions[pos]];
+      // Squad steps hit the same camp strictly in sequence: general 2 attacks
+      // what is left after general 1.
+      let seqSec = 0;
       const squad = option.squad.map((s) => {
         const g = freeByClass.get(s.classId).shift();
+        const startSec = seqSec;
+        const dur = s.durationSec || 0;
+        seqSec += dur;
         return {
           ...s,
+          startSec,
+          durationSec: dur,
+          endSec: seqSec,
           general: {
             uid: g.uid,
             name: g.name,
@@ -1469,6 +1686,8 @@ function plan(input, onProgress) {
           },
         };
       });
+      waveEndSec = Math.max(waveEndSec, seqSec);
+      takenWindowIdx.push(positions[pos]);
       attacks.push({
         camp: {
           number: camp.number,
@@ -1492,8 +1711,10 @@ function plan(input, onProgress) {
         losses: option.losses,
         soloable: info(camp.key).soloable,
         sacrificeExempt: !!option.sacrificeExempt,
+        startSec: 0,
+        durationSec: seqSec,
+        endSec: seqSec,
       });
-      campsTaken++;
     }
 
     // Who did we throw away in this wave? An army that is (almost) completely
@@ -1528,10 +1749,27 @@ function plan(input, onProgress) {
       }
     }
 
+    let blocker = null;
+    if (deferredIdx.length) {
+      const wi = deferredIdx[0];
+      const dInfo = optionsByCamp.get(window[wi].key) || { options: [] };
+      blocker = {
+        number: window[wi].number,
+        need: dInfo.options.length ? dInfo.options[0].generals : null,
+        reason: (deferredReason && deferredReason.reason) ||
+          'не хватило свободных генералов/войск в этой волне',
+      };
+    }
+
     waves.push({
       index: waves.length + 1,
       burned,
-      blocker: failByLen.get(chosenLen + 1) || null,
+      blocker,
+      deferred: deferredIdx.map((wi) => ({
+        number: window[wi].number,
+        key: window[wi].key,
+      })),
+      durationSec: Math.round(waveEndSec * 10) / 10,
       stockBefore,
       stockAfter: { ...stock },
       waveLosses,
@@ -1544,7 +1782,8 @@ function plan(input, onProgress) {
       }, {}),
       attacks,
     });
-    remaining.splice(0, campsTaken);
+    const takenKeys = new Set(takenWindowIdx.map((wi) => window[wi].key));
+    remaining = remaining.filter((c) => !takenKeys.has(c.key));
 
     if (typeof onProgress === 'function') {
       const solved = targets.length - remaining.length;
@@ -1617,4 +1856,8 @@ module.exports = {
   plan, buildGenerals, resolveCamps, groupClasses,
   DEFAULT_UNITS, ALL_PLAYER_UNITS, DEFAULT_CHEAP_UNITS,
   UNIT_RESOURCES, DEFAULT_UNIT_VALUES, calcLostResources,
+  // Exposed for tests of the wave-cover algorithm.
+  buildPositionOptions, greedyCover, coverByDifficulty, backtrackCover,
+  bestCover, pickBetterCover, pickDeferredCamp, hopTravelSec,
+  buildChainOptions, COVER_STRATEGIES,
 };
